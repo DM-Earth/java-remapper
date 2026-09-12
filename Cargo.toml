@@ -1,0 +1,62 @@
+[package]
+name = "java-remapper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+classfile = { version = "0.1", path = "../classfile" }
+mapping-serde = { version = "0.1", path = "../mapping-serde", package = "java-mapping-serde" }
+java-bin-name = { version = "0.3", path = "../java-bin-name" }
+smol_str = "0.3"
+simd_cesu8 = "1.2"
+
+[lints]
+workspace = true
+
+[workspace.lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+let_underscore_drop = "warn"
+single_use_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+elided_lifetimes_in_paths = "deny"
+unused_lifetimes = "forbid"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
+variant_size_differences = "warn"
+dyn_drop = "forbid"
+ellipsis_inclusive_range_patterns = "forbid"
+exported_private_dependencies = "forbid"
+uncommon_codepoints = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = [] }
+
+[workspace.lints.clippy]
+missing_panics_doc = "warn"
+cloned_instead_of_copied = "warn"
+future_not_send = "warn"
+if_not_else = "warn"
+if_then_some_else_none = "warn"
+impl_trait_in_params = "warn"
+macro_use_imports = "deny"
+str_to_string = "warn"
+iter_without_into_iter = "warn"
+decimal_literal_representation = "warn"
+ref_as_ptr = "warn"
+unused_trait_names = "warn"
+unnecessary_semicolon = "warn"
+unnecessary_debug_formatting = "warn"
+too_long_first_doc_paragraph = "warn"
+ref_option = "warn"
+redundant_test_prefix = "warn"
+map_with_unused_argument_over_ranges = "warn"
+manual_midpoint = "warn"
+manual_is_power_of_two = "warn"
+ip_constant = "warn"
+elidable_lifetime_names = "warn"
+coerce_container_to_any = "warn"
+todo = "warn"
+inline_always = "warn"
+multiple_crate_versions = "warn"
+useless_let_if_seq = "warn"
+suboptimal_flops = "warn"
+redundant_clone = "warn"
