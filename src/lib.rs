@@ -1,6 +1,6 @@
 //! Java classfile remapper library.
 
-use std::{collections::HashMap, num::NonZero, sync::OnceLock};
+use std::{borrow::Cow, collections::HashMap, num::NonZero, sync::OnceLock};
 
 use classfile::{
     Attribute, ConstantPoolEntry, FieldHeader, MethodHeader, ModifiedUtf8, Reader, Writer,
@@ -40,12 +40,75 @@ enum AttributeKind {
     Record,
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Default)]
+enum RemapKind {
+    #[default]
+    None,
+    ClassName,
+    // others are welcomed..
+}
+
 #[derive(Debug, Clone, Default)]
 struct ConstState {
     /// Matching attribute. This is only useful for the `Utf8` entry pointed by an attribute.
     matched_attr: Option<AttributeKind>,
+    /// Whether the entry is modified.
+    modified: bool,
+
     /// The remapped value.
+    #[deprecated]
     remapped: Option<Option<SmolStr>>,
+
+    remaps: HashMap<SmolStr, NonZero<u16>>,
+    kinds: HashMap<RemapKind, Option<NonZero<u16>>>,
+}
+
+fn remap_state_raw(
+    remaps: &mut HashMap<SmolStr, NonZero<u16>>,
+    appends: &mut ConstPoolAppends,
+    remapped: SmolStr,
+) -> NonZero<u16> {
+    match remaps.entry(remapped.clone()) {
+        std::collections::hash_map::Entry::Occupied(occupied) => *occupied.get(),
+        std::collections::hash_map::Entry::Vacant(vacant) => {
+            let idx = appends
+                .start
+                .checked_add(appends.entries.len() as u16)
+                .expect("constant pool overflowed");
+            appends.entries.push(remapped);
+            vacant.insert(idx);
+            idx
+        }
+    }
+}
+
+impl ConstState {
+    fn remap<F>(
+        &mut self,
+        kind: RemapKind,
+        appends: &mut ConstPoolAppends,
+        f: F,
+    ) -> Option<NonZero<u16>>
+    where
+        F: FnOnce() -> Option<SmolStr>,
+    {
+        if matches!(kind, RemapKind::None) {
+            return f().map(|remapped| remap_state_raw(&mut self.remaps, appends, remapped));
+        }
+        match self.kinds.entry(kind) {
+            std::collections::hash_map::Entry::Occupied(ke) => *ke.get(),
+            std::collections::hash_map::Entry::Vacant(ke) => {
+                let idx = f().map(|remapped| remap_state_raw(&mut self.remaps, appends, remapped));
+                ke.insert(idx);
+                idx
+            }
+        }
+    }
+}
+
+struct CowAttribute<'a> {
+    name_index: NonZero<u16>,
+    info: Cow<'a, [u8]>,
 }
 
 /// Auxiliary buffer for a remapper.
@@ -67,10 +130,17 @@ pub struct Buffer<'a> {
 
 /// Buffer of a constant pool.
 /// States and entries are indexed through their raw id, which is retrived directly from the class file.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ConstPoolBuffer<'a> {
     states: Vec<ConstState>,
     entries: Vec<Option<ConstantPoolEntry<'a>>>,
+    appends: ConstPoolAppends,
+}
+
+#[derive(Debug)]
+struct ConstPoolAppends {
+    start: NonZero<u16>,
+    entries: Vec<SmolStr>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -85,6 +155,7 @@ enum AttrContext<'a> {
 
 impl Buffer<'_> {
     /// Creates a new buffer.
+    #[allow(clippy::missing_panics_doc)]
     pub fn new() -> Self {
         static ATTRIBUTE_MATCHER_STATIC: OnceLock<HashMap<Box<[u8]>, AttributeKind>> =
             OnceLock::new();
@@ -144,7 +215,14 @@ impl Buffer<'_> {
             field_refs: Vec::new(),
             method_refs: Vec::new(),
 
-            const_pool: Default::default(),
+            const_pool: ConstPoolBuffer {
+                states: Vec::new(),
+                entries: Vec::new(),
+                appends: ConstPoolAppends {
+                    start: NonZero::new(1).unwrap(),
+                    entries: Vec::new(),
+                },
+            },
             interfaces: Vec::new(),
             fields: Vec::new(),
             methods: Vec::new(),
@@ -159,12 +237,17 @@ impl Buffer<'_> {
 
         self.const_pool.states.clear();
         self.const_pool.entries.clear();
+        self.const_pool.appends.start = NonZero::new(1).unwrap();
+        self.const_pool.appends.entries.clear();
+
         self.interfaces.clear();
         self.fields.clear();
         self.methods.clear();
         self.attrs.clear();
     }
+}
 
+impl ConstPoolBuffer<'_> {
     fn remap_attribute(&mut self, attr: &Attribute<'_>, index: &Index, cx: AttrContext<'_>) {
         let _ = self.try_remap_attribute(attr, index, cx);
     }
@@ -176,7 +259,6 @@ impl Buffer<'_> {
         cx: AttrContext<'_>,
     ) -> Result<(), classfile::Error> {
         let Some(kind) = self
-            .const_pool
             .states
             .get(attr.name_index.get() as usize)
             .and_then(|s| s.matched_attr)
@@ -196,18 +278,14 @@ impl Buffer<'_> {
             AttributeKind::InnerClasses => {
                 let mut reader = InnerClassesReader::new(attr.info)?;
                 while let Some(class) = reader.next().transpose()? {
-                    self.const_pool
-                        .remap_class_info(index, class.inner_info_idx);
+                    self.remap_class_info(index, class.inner_info_idx);
                     if let Some(idx) = class.outer_info_idx {
-                        self.const_pool.remap_class_info(index, idx);
+                        self.remap_class_info(index, idx);
                     }
                     if let Some(name_idx) = class.inner_name_idx
-                        && let Some(Some(ConstantPoolEntry::Class(src_idx))) = self
-                            .const_pool
-                            .entries
-                            .get(class.inner_info_idx.get() as usize)
+                        && let Some(Some(ConstantPoolEntry::Class(src_idx))) =
+                            self.entries.get(class.inner_info_idx.get() as usize)
                         && let Ok([src, dst]) = self
-                            .const_pool
                             .states
                             .get_disjoint_mut([src_idx.get() as usize, name_idx.get() as usize])
                         && dst.remapped.is_none()
@@ -225,12 +303,12 @@ impl Buffer<'_> {
             AttributeKind::Signature => {
                 let ConstantPoolIndex(idx) = ConstantPoolIndex::read(attr.info)?;
                 if let Some(Some(ConstantPoolEntry::Utf8(rsig))) =
-                    self.const_pool.entries.get(idx.get() as usize)
+                    self.entries.get(idx.get() as usize)
                     && let Ok(rsig) = mutf8::decode(rsig.0)
                 {
                     match cx {
                         AttrContext::Class(_) => {
-                            if let Some(dst) = self.const_pool.states.get_mut(idx.get() as usize)
+                            if let Some(dst) = self.states.get_mut(idx.get() as usize)
                                 && dst.remapped.is_none()
                                 && let Ok(remapped) = remap_class_sig(index, &rsig)
                             {
@@ -238,7 +316,7 @@ impl Buffer<'_> {
                             }
                         }
                         AttrContext::Method(_) => {
-                            if let Some(dst) = self.const_pool.states.get_mut(idx.get() as usize)
+                            if let Some(dst) = self.states.get_mut(idx.get() as usize)
                                 && dst.remapped.is_none()
                                 && let Ok(remapped) = remap_method_sig(index, &rsig)
                             {
@@ -246,7 +324,7 @@ impl Buffer<'_> {
                             }
                         }
                         AttrContext::Field | AttrContext::RecordComponent => {
-                            if let Some(dst) = self.const_pool.states.get_mut(idx.get() as usize)
+                            if let Some(dst) = self.states.get_mut(idx.get() as usize)
                                 && dst.remapped.is_none()
                                 && let Ok(remapped) = remap_field_sig(index, &rsig)
                             {
@@ -261,13 +339,11 @@ impl Buffer<'_> {
                 if let AttrContext::Method(method) = cx {
                     let mut reader = LocalVariableTableReader::new(attr.info)?;
                     while let Some(entry) = reader.next().transpose()? {
-                        if let Ok([name_state, desc_state]) =
-                            self.const_pool.states.get_disjoint_mut([
-                                entry.name_idx.get() as usize,
-                                entry.desc_idx.get() as usize,
-                            ])
-                            && let Some(Some(ConstantPoolEntry::Utf8(desc))) =
-                                self.const_pool.entries.get(entry.desc_idx.get() as usize)
+                        if let Ok([name_state, desc_state]) = self.states.get_disjoint_mut([
+                            entry.name_idx.get() as usize,
+                            entry.desc_idx.get() as usize,
+                        ]) && let Some(Some(ConstantPoolEntry::Utf8(desc))) =
+                            self.entries.get(entry.desc_idx.get() as usize)
                             && let Ok(desc) = mutf8::decode(desc.0)
                         {
                             desc_state.remapped =
@@ -289,45 +365,44 @@ impl Buffer<'_> {
             AttributeKind::RuntimeVisibleAnnotations => {
                 let mut reader = RuntimeVisibleAnnotationsReader::new(attr.info)?;
                 while let Some(entry) = reader.next().transpose()? {
-                    self.const_pool.remap_annotation(index, &entry);
+                    self.remap_annotation(index, &entry);
                 }
             }
             AttributeKind::RuntimeInvisibleAnnotations => {
                 let mut reader = RuntimeInvisibleAnnotationsReader::new(attr.info)?;
                 while let Some(entry) = reader.next().transpose()? {
-                    self.const_pool.remap_annotation(index, &entry);
+                    self.remap_annotation(index, &entry);
                 }
             }
             AttributeKind::RuntimeVisibleParameterAnnotations => {
                 let mut reader = RuntimeVisibleParamAnnotationsReader::new(attr.info)?;
                 while let Some(entry) = reader.next().transpose()? {
-                    self.const_pool.remap_param_annotations(index, &entry);
+                    self.remap_param_annotations(index, &entry);
                 }
             }
             AttributeKind::RuntimeInvisibleParameterAnnotations => {
                 let mut reader = RuntimeInvisibleParamAnnotationsReader::new(attr.info)?;
                 while let Some(entry) = reader.next().transpose()? {
-                    self.const_pool.remap_param_annotations(index, &entry);
+                    self.remap_param_annotations(index, &entry);
                 }
             }
             AttributeKind::RuntimeVisibleTypeAnnotations => {
                 let mut reader = RuntimeVisibleTypeAnnotationsReader::new(attr.info)?;
                 while let Some(entry) = reader.next().transpose()? {
-                    self.const_pool.remap_typed_annotation(index, &entry);
+                    self.remap_typed_annotation(index, &entry);
                 }
             }
             AttributeKind::RuntimeInvisibleTypeAnnotations => {
                 let mut reader = RuntimeInvisibleTypeAnnotationsReader::new(attr.info)?;
                 while let Some(entry) = reader.next().transpose()? {
-                    self.const_pool.remap_typed_annotation(index, &entry);
+                    self.remap_typed_annotation(index, &entry);
                 }
             }
             AttributeKind::Record => {
                 let mut reader = RecordReader::new(attr.info)?;
                 while let Some(entry) = reader.next().transpose()? {
                     if let AttrContext::Class(class) = cx {
-                        self.const_pool
-                            .remap_field(index, class, entry.name_idx, entry.desc_idx);
+                        self.remap_field(index, class, entry.name_idx, entry.desc_idx);
                     }
                     for attr in &*entry.attributes {
                         self.try_remap_attribute(attr, index, AttrContext::RecordComponent)?;
@@ -337,9 +412,7 @@ impl Buffer<'_> {
         }
         Ok(())
     }
-}
 
-impl ConstPoolBuffer<'_> {
     fn remap_class_info(&mut self, index: &Index, idx: NonZero<u16>) {
         if let Some(Some(ConstantPoolEntry::Class(idx))) = self.entries.get(idx.get() as usize) {
             self.remap_class_name(index, *idx);
@@ -518,7 +591,7 @@ impl ConstPoolBuffer<'_> {
                 })
             {
                 name_state.remapped = Some(dst.name.clone());
-                name_state.remapped = Some(remap_method_desc(index, &desc).ok().flatten());
+                desc_state.remapped = Some(remap_method_desc(index, &desc).ok().flatten());
                 Some(dst)
             } else {
                 name_state.remapped = Some(None);
@@ -749,6 +822,12 @@ pub fn remap<'a>(
             },
         );
 
+        buf.const_pool.appends.start = buf
+            .const_pool
+            .appends
+            .start
+            .checked_add(entry.space())
+            .expect("constant pool overflowed");
         buf.const_pool.entries.resize(idx.get() as usize, None);
         buf.const_pool.entries.push(Some(entry));
     }
@@ -782,7 +861,8 @@ pub fn remap<'a>(
         );
         let mut attrs = Vec::with_capacity(fr.len());
         while let Some(attr) = fr.next().transpose()? {
-            buf.remap_attribute(&attr, index, AttrContext::Field);
+            buf.const_pool
+                .remap_attribute(&attr, index, AttrContext::Field);
             attrs.push(attr);
         }
         buf.fields.push((header, attrs));
@@ -799,7 +879,8 @@ pub fn remap<'a>(
         );
         let mut attrs = Vec::with_capacity(mr.len());
         while let Some(attr) = mr.next().transpose()? {
-            buf.remap_attribute(&attr, index, AttrContext::Method(this_method));
+            buf.const_pool
+                .remap_attribute(&attr, index, AttrContext::Method(this_method));
             attrs.push(attr);
         }
         buf.methods.push((header, attrs));
@@ -807,7 +888,8 @@ pub fn remap<'a>(
 
     let mut reader = reader.finish()?;
     while let Some(attr) = reader.next().transpose()? {
-        buf.remap_attribute(&attr, index, AttrContext::Class(this_class));
+        buf.const_pool
+            .remap_attribute(&attr, index, AttrContext::Class(this_class));
         buf.attrs.push(attr);
     }
     drop(reader);
