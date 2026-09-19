@@ -747,16 +747,16 @@ impl ConstPoolBuffer<'_> {
         ni: NonZero<u16>,
         di: NonZero<u16>,
     ) -> (NonZero<u16>, NonZero<u16>) {
-        let Some(name) = self.utf8(ni) else {
-            return (ni, di);
-        };
-        let Some(dst) = class.and_then(|class| class.fields.get(&*name)) else {
-            return (ni, di);
-        };
-        let name_idx = self.remap_utf8(ni, RemapKind::FieldName, |_| Some(dst.clone()));
         let desc_idx = self.remap_utf8(di, RemapKind::FieldType, |desc| {
             remap_field_type(index, desc).ok().flatten()
         });
+        let Some(name) = self.utf8(ni) else {
+            return (ni, desc_idx);
+        };
+        let Some(dst) = class.and_then(|class| class.fields.get(&*name)) else {
+            return (ni, desc_idx);
+        };
+        let name_idx = self.remap_utf8(ni, RemapKind::FieldName, |_| Some(dst.clone()));
         (name_idx, desc_idx)
     }
 
@@ -767,8 +767,11 @@ impl ConstPoolBuffer<'_> {
         ni: NonZero<u16>,
         di: NonZero<u16>,
     ) -> (Option<&'i Method>, NonZero<u16>, NonZero<u16>) {
+        let desc_idx = self.remap_utf8(di, RemapKind::MethodDescriptor, |desc| {
+            remap_method_desc(index, desc).ok().flatten()
+        });
         let (Some(name), Some(desc)) = (self.utf8(ni), self.utf8(di)) else {
-            return (None, ni, di);
+            return (None, ni, desc_idx);
         };
         let Some(dst) = class.and_then(|class| {
             class.methods.get(&DescKey {
@@ -776,12 +779,9 @@ impl ConstPoolBuffer<'_> {
                 desc: desc.to_smolstr(),
             })
         }) else {
-            return (None, ni, di);
+            return (None, ni, desc_idx);
         };
         let name_idx = self.remap_utf8(ni, RemapKind::MethodName, |_| dst.name.clone());
-        let desc_idx = self.remap_utf8(di, RemapKind::MethodDescriptor, |desc| {
-            remap_method_desc(index, desc).ok().flatten()
-        });
         (Some(dst), name_idx, desc_idx)
     }
 }
