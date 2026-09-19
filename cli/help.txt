@@ -1,0 +1,7 @@
+Usage: java-remapper-cli [OPTION]...
+
+Remap JVM bytecode files from standard input, and write on standard output.
+
+      --tiny2  FILE use the FILE as mapping file, in Tiny2 format
+  -o, --output FILE output into the given path
+  -h, --help        give this help

@@ -37,11 +37,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
+name = "clap_lex"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
+
+[[package]]
 name = "classfile"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
  "bitflags",
+]
+
+[[package]]
+name = "fast-unescape"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c903842a2cea0abc2ca297a2b173f5e5cf6bd5c01bec0b1e95799014f0813fde"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -56,6 +71,25 @@ name = "java-mapping-serde"
 version = "0.1.0"
 
 [[package]]
+name = "java-mapping-serde-io-util"
+version = "0.1.0"
+dependencies = [
+ "memchr",
+ "smol_str",
+]
+
+[[package]]
+name = "java-mapping-serde-tiny2"
+version = "0.1.0"
+dependencies = [
+ "fast-unescape",
+ "java-mapping-serde",
+ "java-mapping-serde-io-util",
+ "smallvec",
+ "smol_str",
+]
+
+[[package]]
 name = "java-remapper"
 version = "0.1.0"
 dependencies = [
@@ -65,6 +99,22 @@ dependencies = [
  "simd_cesu8",
  "smol_str",
 ]
+
+[[package]]
+name = "java-remapper-cli"
+version = "0.1.0"
+dependencies = [
+ "clap_lex",
+ "java-mapping-serde",
+ "java-mapping-serde-tiny2",
+ "java-remapper",
+]
+
+[[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "proc-macro2"

@@ -23,11 +23,13 @@ use java_bin_name::{
 use simd_cesu8::mutf8;
 use smol_str::{SmolStr, ToSmolStr as _};
 
+use crate::index::{Class, DescKey, Method};
+
 mod index;
 
 pub use index::Index;
 
-use crate::index::{Class, DescKey, Method};
+pub use classfile::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum AttributeKind {
@@ -309,7 +311,7 @@ impl ConstPoolBuffer<'_> {
         attr: &mut CowAttribute<'_>,
         index: &Index,
         cx: AttrContext<'_>,
-    ) -> Result<(), classfile::Error> {
+    ) -> Result<(), Error> {
         let Some(kind) = self
             .states
             .get(attr.name_index.get() as usize)
@@ -962,7 +964,7 @@ pub fn remap<'a>(
     dst: &mut Vec<u8>,
     index: &Index,
     buf: &mut Buffer<'a>,
-) -> Result<(), classfile::Error> {
+) -> Result<(), Error> {
     buf.clear();
     let reader = Reader::new(src);
 
