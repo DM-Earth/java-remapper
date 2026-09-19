@@ -18,7 +18,7 @@ use classfile::{
 };
 use java_bin_name::{
     ClassSignature, FieldType, MethodDescriptor, MethodSignature, ReducedClassTypeSignature,
-    TypeParameter, TypeSignature,
+    TypeArgument, TypeParameter, TypeSignature,
 };
 use simd_cesu8::mutf8;
 use smol_str::{SmolStr, ToSmolStr as _};
@@ -850,17 +850,48 @@ fn remap_type_sig<'a>(
         TypeSignature::Class { sig, suffix } => TypeSignature::Class {
             sig: ReducedClassTypeSignature {
                 name: index.remap_class_name(sig.name, changed),
-                args: sig.args,
+                args: {
+                    let mut args = sig.args;
+                    remap_type_args(index, &mut args, changed);
+                    args
+                },
             },
             suffix: suffix.map(|suffix| ReducedClassTypeSignature {
                 name: index.remap_class_name(suffix.name, changed),
-                args: suffix.args,
+                args: {
+                    let mut args = suffix.args;
+                    remap_type_args(index, &mut args, changed);
+                    args
+                },
             }),
         },
         TypeSignature::Array(sig) => {
             TypeSignature::Array(Box::new(remap_type_sig(index, *sig, changed)))
         }
         nice => nice,
+    }
+}
+
+fn remap_type_arg<'a>(
+    index: &'a Index,
+    src: TypeArgument<'a>,
+    changed: &mut bool,
+) -> TypeArgument<'a> {
+    TypeArgument {
+        kind: src.kind,
+        signature: remap_type_sig(index, src.signature, changed),
+    }
+}
+
+fn remap_type_args<'a>(
+    index: &'a Index,
+    args: &mut [Option<Box<TypeArgument<'a>>>],
+    changed: &mut bool,
+) {
+    for op in args {
+        if let Some(arg) = op.take() {
+            *op = Some(Box::new(remap_type_arg(index, *arg, changed)))
+        }
     }
 }
 
