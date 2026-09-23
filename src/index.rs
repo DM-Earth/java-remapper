@@ -1,12 +1,16 @@
-use std::{collections::HashMap, hash::Hash, marker::PhantomData};
+use std::{collections::HashMap, hash::Hash, marker::PhantomData, num::NonZero};
 
+use classfile::ConstantPoolEntry;
 use mapping_serde::{Deserialize, Deserializer, de::Visitor};
+use simd_cesu8::mutf8;
 use smol_str::SmolStr;
 
-/// Naming mapping.
+/// Naming mapping and auxiliary information about the classes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Index {
     pub(crate) classes: HashMap<SmolStr, Class>,
+    /// Parent class/interfaces of classes.
+    pub(crate) inherency: HashMap<SmolStr, Vec<SmolStr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +56,7 @@ impl Index {
 
         let mut index = Self {
             classes: HashMap::new(),
+            inherency: HashMap::new(),
         };
         while deserializer
             .deserialize_class(RootVisitor(&mut index))?
@@ -60,12 +65,100 @@ impl Index {
         Ok(index)
     }
 
+    fn populate_inherency_inner(
+        &mut self,
+        buf: &[u8],
+        cp_cap: &mut usize,
+    ) -> Result<(), classfile::Error> {
+        let reader = classfile::Reader::new(buf);
+        let (_, mut reader) = reader.header()?;
+        let mut cp: Vec<Option<ConstantPoolEntry<'_>>> = Vec::with_capacity(*cp_cap);
+        while let Some((idx, entry)) = reader.next().transpose()? {
+            cp.resize(idx.get() as usize, None);
+            cp.push(Some(entry));
+        }
+        *cp_cap = (*cp_cap).max(cp.len());
+        let reader = reader.finish()?;
+        let (metadata, mut reader) = reader.metadata()?;
+        let Some(this) = name_from_cp(&cp, metadata.this_class) else {
+            return Ok(());
+        };
+        let mut parents = Vec::new();
+        if let Some(p) = metadata.super_class
+            && let Some(p) = name_from_cp(&cp, p)
+        {
+            parents.push(p);
+        }
+        while let Some(p) = reader.next().transpose()? {
+            if let Some(p) = name_from_cp(&cp, p) {
+                parents.push(p);
+            }
+        }
+        if !parents.is_empty() {
+            self.inherency.insert(this, parents);
+        }
+        Ok(())
+    }
+
+    /// Populate inherency information from given class files.
+    pub fn populate_inherency<I, B>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = B>,
+        B: AsRef<[u8]>,
+    {
+        let mut cp_cap = 0;
+        for buf in iter {
+            let _ = self.populate_inherency_inner(buf.as_ref(), &mut cp_cap);
+        }
+    }
+
     pub(crate) fn remap_class_name<'a>(&'a self, src: &'a str, changed: &mut bool) -> &'a str {
         self.classes
             .get(src)
             .and_then(|c| c.name.as_deref())
             .inspect(|_| *changed = true)
             .unwrap_or(src)
+    }
+
+    pub(crate) fn remap_field_name<'s>(&'s self, class: &str, orig: &str) -> Option<&'s SmolStr> {
+        self.classes
+            .get(class)
+            .and_then(|cl| cl.fields.get(orig))
+            .or_else(|| {
+                for cl in self.inherency.get(class)? {
+                    if let Some(dst) = self.remap_field_name(cl, orig) {
+                        return Some(dst);
+                    }
+                }
+                None
+            })
+    }
+    pub(crate) fn remap_method_name<'s>(
+        &'s self,
+        class: &str,
+        orig: &DescKey,
+    ) -> Option<&'s Method> {
+        self.classes
+            .get(class)
+            .and_then(|cl| cl.methods.get(orig))
+            .or_else(|| {
+                for cl in self.inherency.get(class)? {
+                    if let Some(dst) = self.remap_method_name(cl, orig) {
+                        return Some(dst);
+                    }
+                }
+                None
+            })
+    }
+}
+
+fn name_from_cp(cp: &[Option<ConstantPoolEntry<'_>>], idx: NonZero<u16>) -> Option<SmolStr> {
+    if let Some(Some(ConstantPoolEntry::Utf8(enc))) = cp.get(idx.get() as usize)
+        && let Ok(decoded) = mutf8::decode(enc.0)
+    {
+        Some(decoded.into())
+    } else {
+        None
     }
 }
 

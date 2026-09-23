@@ -23,7 +23,7 @@ use java_bin_name::{
 use simd_cesu8::mutf8;
 use smol_str::{SmolStr, ToSmolStr as _};
 
-use crate::index::{Class, DescKey, Method};
+use crate::index::{DescKey, Method};
 
 mod index;
 
@@ -115,7 +115,15 @@ impl ConstState {
     where
         F: FnOnce() -> Option<SmolStr>,
     {
-        if matches!(kind, RemapKind::None) {
+        if matches!(
+            kind,
+            RemapKind::None
+            // names below can be varied
+                | RemapKind::InnerClassName
+                | RemapKind::FieldName
+                | RemapKind::MethodName
+                | RemapKind::LocalVarName
+        ) {
             return f().map(|remapped| remap_state_raw(&mut self.remaps, appends, remapped));
         }
         match self.kinds.entry(kind) {
@@ -187,7 +195,7 @@ struct ConstPoolAppends {
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum AttrContext<'a> {
-    Class(Option<&'a Class>),
+    Class(Option<&'a str>),
     Field,
     Method(Option<&'a Method>),
     RecordComponent,
@@ -611,7 +619,7 @@ impl ConstPoolBuffer<'_> {
         }
     }
 
-    fn class<'a>(&self, index: &'a Index, idx: NonZero<u16>) -> Option<&'a Class> {
+    fn class_name(&self, idx: NonZero<u16>) -> Option<Cow<'_, str>> {
         self.entries
             .get(idx.get() as usize)
             .and_then(Option::as_ref)
@@ -625,7 +633,6 @@ impl ConstPoolBuffer<'_> {
                 ConstantPoolEntry::Utf8(name) => mutf8::decode(name.0).ok(),
                 _ => None,
             })
-            .and_then(|name| index.classes.get(&*name))
     }
 
     fn remap_field_name_and_type(
@@ -667,13 +674,13 @@ impl ConstPoolBuffer<'_> {
         };
         let (name_index, descriptor_index) = (*name_index, *descriptor_index);
         self.states[idx].modified = true;
-        let class = self.class(index, class_idx);
+        let class = self.class_name(class_idx).map(SmolStr::from);
         let (name_index, descriptor_index) = if method {
             let (_, name_index, descriptor_index) =
-                self.remap_method(index, class, name_index, descriptor_index);
+                self.remap_method(index, class.as_deref(), name_index, descriptor_index);
             (name_index, descriptor_index)
         } else {
-            self.remap_field(index, class, name_index, descriptor_index)
+            self.remap_field(index, class.as_deref(), name_index, descriptor_index)
         };
         self.entries[idx] = Some(ConstantPoolEntry::NameAndType {
             name_index,
@@ -743,7 +750,7 @@ impl ConstPoolBuffer<'_> {
     fn remap_field(
         &mut self,
         index: &Index,
-        class: Option<&Class>,
+        class: Option<&str>,
         ni: NonZero<u16>,
         di: NonZero<u16>,
     ) -> (NonZero<u16>, NonZero<u16>) {
@@ -753,7 +760,7 @@ impl ConstPoolBuffer<'_> {
         let Some(name) = self.utf8(ni) else {
             return (ni, desc_idx);
         };
-        let Some(dst) = class.and_then(|class| class.fields.get(&*name)) else {
+        let Some(dst) = class.and_then(|cl| index.remap_field_name(cl, &name)) else {
             return (ni, desc_idx);
         };
         let name_idx = self.remap_utf8(ni, RemapKind::FieldName, |_| Some(dst.clone()));
@@ -762,8 +769,8 @@ impl ConstPoolBuffer<'_> {
 
     fn remap_method<'i>(
         &mut self,
-        index: &Index,
-        class: Option<&'i Class>,
+        index: &'i Index,
+        class: Option<&str>,
         ni: NonZero<u16>,
         di: NonZero<u16>,
     ) -> (Option<&'i Method>, NonZero<u16>, NonZero<u16>) {
@@ -773,11 +780,14 @@ impl ConstPoolBuffer<'_> {
         let (Some(name), Some(desc)) = (self.utf8(ni), self.utf8(di)) else {
             return (None, ni, desc_idx);
         };
-        let Some(dst) = class.and_then(|class| {
-            class.methods.get(&DescKey {
-                name: name.to_smolstr(),
-                desc: desc.to_smolstr(),
-            })
+        let Some(dst) = class.and_then(|cl| {
+            index.remap_method_name(
+                cl,
+                &DescKey {
+                    name: name.to_smolstr(),
+                    desc: desc.to_smolstr(),
+                },
+            )
         }) else {
             return (None, ni, desc_idx);
         };
@@ -1064,7 +1074,11 @@ pub fn remap<'a>(
     let (metadata, mut reader) = reader.metadata()?;
     // Class infos are rewritten in place at the end, so `Class` entries still hold their
     // original names while the references below are remapped.
-    let this_class = buf.const_pool.class(index, metadata.this_class);
+    let this_class = buf
+        .const_pool
+        .class_name(metadata.this_class)
+        .map(SmolStr::from);
+    let this_class = this_class.as_deref();
 
     for &(ci, nti) in &buf.field_refs {
         buf.const_pool.remap_field_name_and_type(index, ci, nti);

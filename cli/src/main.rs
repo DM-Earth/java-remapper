@@ -96,11 +96,10 @@ fn parse_args(raw: impl IntoIterator<Item = impl Into<std::ffi::OsString>>) -> R
                     mapping_path = Some(val.into());
                 }
                 "output" => {
-                    let val = raw
-                        .next(&mut cursor)
-                        .map(|p| p.to_value_os())
-                        .ok_or(Error::MissingOutput)?;
-                    output = Some(val.into());
+                    let val = raw.next(&mut cursor).ok_or(Error::MissingOutput)?;
+                    if !val.is_stdio() {
+                        output = Some(val.to_value_os().into());
+                    }
                 }
                 "help" => print_help(),
                 myth => return Err(Error::UnknownArg(format!("--{myth}"))),
@@ -110,6 +109,12 @@ fn parse_args(raw: impl IntoIterator<Item = impl Into<std::ffi::OsString>>) -> R
                 let flag = flag.map_err(|_| Error::NonUtf8)?;
                 match flag {
                     'h' => print_help(),
+                    'o' => {
+                        let val = raw.next(&mut cursor).ok_or(Error::MissingOutput)?;
+                        if !val.is_stdio() {
+                            output = Some(val.to_value_os().into());
+                        }
+                    }
                     myth => return Err(Error::UnknownArg(format!("-{myth}"))),
                 }
             }
@@ -125,7 +130,7 @@ fn parse_args(raw: impl IntoIterator<Item = impl Into<std::ffi::OsString>>) -> R
 
 fn main() -> Result<(), Error> {
     let args = parse_args(std::env::args_os())?;
-    let index: Index = match args.fmt {
+    let mut index: Index = match args.fmt {
         MappingFormat::Tiny2 => mapping_serde_tiny2::from_reader(BufReader::new(
             std::fs::File::open(&args.mapping_path)?,
         ))
@@ -134,6 +139,7 @@ fn main() -> Result<(), Error> {
     };
     let mut src = Vec::new();
     stdin().read_to_end(&mut src)?;
+    index.populate_inherency([&src]);
     let mut dst = Vec::with_capacity(src.len());
     let mut buf = remapper::Buffer::new();
     remapper::remap(&src, &mut dst, &index, &mut buf)?;
