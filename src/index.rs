@@ -1,4 +1,9 @@
-use std::{collections::HashMap, hash::Hash, marker::PhantomData, num::NonZero};
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
+    marker::PhantomData,
+    num::NonZero,
+};
 
 use classfile::ConstantPoolEntry;
 use mapping_serde::{Deserialize, Deserializer, de::Visitor};
@@ -80,17 +85,17 @@ impl Index {
         *cp_cap = (*cp_cap).max(cp.len());
         let reader = reader.finish()?;
         let (metadata, mut reader) = reader.metadata()?;
-        let Some(this) = name_from_cp(&cp, metadata.this_class) else {
+        let Some(this) = class_name_from_cp(&cp, metadata.this_class) else {
             return Ok(());
         };
         let mut parents = Vec::new();
         if let Some(p) = metadata.super_class
-            && let Some(p) = name_from_cp(&cp, p)
+            && let Some(p) = class_name_from_cp(&cp, p)
         {
             parents.push(p);
         }
         while let Some(p) = reader.next().transpose()? {
-            if let Some(p) = name_from_cp(&cp, p) {
+            if let Some(p) = class_name_from_cp(&cp, p) {
                 parents.push(p);
             }
         }
@@ -120,7 +125,15 @@ impl Index {
             .unwrap_or(src)
     }
 
-    pub(crate) fn remap_field_name<'s>(&'s self, class: &str, orig: &str) -> Option<&'s SmolStr> {
+    fn remap_field_name_inner<'s, 'a>(
+        &'s self,
+        class: &'a str,
+        orig: &str,
+        protection: &mut HashSet<&'a str>,
+    ) -> Option<&'s SmolStr> {
+        if !protection.insert(class) {
+            return None;
+        }
         self.classes
             .get(class)
             .and_then(|cl| cl.fields.get(orig))
@@ -133,11 +146,21 @@ impl Index {
                 None
             })
     }
-    pub(crate) fn remap_method_name<'s>(
+
+    pub(crate) fn remap_field_name<'s>(&'s self, class: &str, orig: &str) -> Option<&'s SmolStr> {
+        let mut protection = HashSet::with_capacity(4);
+        self.remap_field_name_inner(class, orig, &mut protection)
+    }
+
+    fn remap_method_name_inner<'s, 'a>(
         &'s self,
-        class: &str,
+        class: &'a str,
         orig: &DescKey,
+        protection: &mut HashSet<&'a str>,
     ) -> Option<&'s Method> {
+        if !protection.insert(class) {
+            return None;
+        }
         self.classes
             .get(class)
             .and_then(|cl| cl.methods.get(orig))
@@ -149,6 +172,27 @@ impl Index {
                 }
                 None
             })
+    }
+
+    pub(crate) fn remap_method_name<'s>(
+        &'s self,
+        class: &str,
+        orig: &DescKey,
+    ) -> Option<&'s Method> {
+        let mut protection = HashSet::with_capacity(4);
+        self.remap_method_name_inner(class, orig, &mut protection)
+    }
+}
+
+fn class_name_from_cp(cp: &[Option<ConstantPoolEntry<'_>>], idx: NonZero<u16>) -> Option<SmolStr> {
+    class_from_cp(cp, idx).and_then(|idx| name_from_cp(cp, idx))
+}
+
+fn class_from_cp(cp: &[Option<ConstantPoolEntry<'_>>], idx: NonZero<u16>) -> Option<NonZero<u16>> {
+    if let Some(Some(ConstantPoolEntry::Class(cl))) = cp.get(idx.get() as usize) {
+        Some(*cl)
+    } else {
+        None
     }
 }
 
