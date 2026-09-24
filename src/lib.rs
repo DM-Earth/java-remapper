@@ -156,6 +156,10 @@ impl CowAttribute<'_> {
             info: &self.info,
         }
     }
+
+    fn len(&self) -> usize {
+        self.info.len() + size_of::<NonZero<u16>>()
+    }
 }
 
 impl<'a> From<Attribute<'a>> for CowAttribute<'a> {
@@ -356,7 +360,7 @@ impl ConstPoolBuffer<'_> {
         match kind {
             AttributeKind::Code => {
                 let reader = CodeReader::new(&*attr.info);
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(attr.len());
                 let writer = CodeWriter::new(&mut buf);
                 let (body, mut reader) = reader.body()?;
                 let mut writer = writer.set_body(&body)?;
@@ -375,7 +379,7 @@ impl ConstPoolBuffer<'_> {
             }
             AttributeKind::InnerClasses => {
                 let mut reader = InnerClassesReader::new(&*attr.info)?;
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(attr.len());
                 let mut writer = InnerClassesWriter::new(&mut buf)?;
                 while let Some(mut class) = reader.next().transpose()? {
                     // The simple name is a part of the mapped name of the inner class.
@@ -428,7 +432,7 @@ impl ConstPoolBuffer<'_> {
             AttributeKind::LocalVariableTable => {
                 if let AttrContext::Method(method) = attr_cx {
                     let mut reader = LocalVariableTableReader::new(&*attr.info)?;
-                    let mut buf = Vec::new();
+                    let mut buf = Vec::with_capacity(attr.len());
                     let mut writer = LocalVariableTableWriter::new(&mut buf)?;
                     while let Some(mut entry) = reader.next().transpose()? {
                         entry.desc_idx = self.remap_field_type(index, entry.desc_idx);
@@ -450,7 +454,7 @@ impl ConstPoolBuffer<'_> {
             AttributeKind::LocalVariableTypeTable => {
                 if let AttrContext::Method(method) = attr_cx {
                     let mut reader = LocalVariableTypeTableReader::new(&*attr.info)?;
-                    let mut buf = Vec::new();
+                    let mut buf = Vec::with_capacity(attr.len());
                     let mut writer = LocalVariableTypeTableWriter::new(&mut buf)?;
                     while let Some(mut entry) = reader.next().transpose()? {
                         entry.signature_idx = self.remap_utf8(
@@ -475,7 +479,7 @@ impl ConstPoolBuffer<'_> {
             }
             AttributeKind::RuntimeVisibleAnnotations => {
                 let mut reader = RuntimeVisibleAnnotationsReader::new(&*attr.info)?;
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(attr.len());
                 let mut writer = RuntimeVisibleAnnotationsWriter::new(&mut buf)?;
                 while let Some(mut entry) = reader.next().transpose()? {
                     self.remap_annotation(index, &mut entry);
@@ -486,7 +490,7 @@ impl ConstPoolBuffer<'_> {
             }
             AttributeKind::RuntimeInvisibleAnnotations => {
                 let mut reader = RuntimeInvisibleAnnotationsReader::new(&*attr.info)?;
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(attr.len());
                 let mut writer = RuntimeInvisibleAnnotationsWriter::new(&mut buf)?;
                 while let Some(mut entry) = reader.next().transpose()? {
                     self.remap_annotation(index, &mut entry);
@@ -497,7 +501,7 @@ impl ConstPoolBuffer<'_> {
             }
             AttributeKind::RuntimeVisibleParameterAnnotations => {
                 let mut reader = RuntimeVisibleParamAnnotationsReader::new(&*attr.info)?;
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(attr.len());
                 let mut writer = RuntimeVisibleParamAnnotationsWriter::new(&mut buf)?;
                 while let Some(mut entry) = reader.next().transpose()? {
                     self.remap_param_annotations(index, &mut entry);
@@ -508,7 +512,7 @@ impl ConstPoolBuffer<'_> {
             }
             AttributeKind::RuntimeInvisibleParameterAnnotations => {
                 let mut reader = RuntimeInvisibleParamAnnotationsReader::new(&*attr.info)?;
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(attr.len());
                 let mut writer = RuntimeInvisibleParamAnnotationsWriter::new(&mut buf)?;
                 while let Some(mut entry) = reader.next().transpose()? {
                     self.remap_param_annotations(index, &mut entry);
@@ -519,7 +523,7 @@ impl ConstPoolBuffer<'_> {
             }
             AttributeKind::RuntimeVisibleTypeAnnotations => {
                 let mut reader = RuntimeVisibleTypeAnnotationsReader::new(&*attr.info)?;
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(attr.len());
                 let mut writer = RuntimeVisibleTypeAnnotationsWriter::new(&mut buf)?;
                 while let Some(mut entry) = reader.next().transpose()? {
                     self.remap_typed_annotation(index, &mut entry);
@@ -530,7 +534,7 @@ impl ConstPoolBuffer<'_> {
             }
             AttributeKind::RuntimeInvisibleTypeAnnotations => {
                 let mut reader = RuntimeInvisibleTypeAnnotationsReader::new(&*attr.info)?;
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(attr.len());
                 let mut writer = RuntimeInvisibleTypeAnnotationsWriter::new(&mut buf)?;
                 while let Some(mut entry) = reader.next().transpose()? {
                     self.remap_typed_annotation(index, &mut entry);
@@ -542,13 +546,13 @@ impl ConstPoolBuffer<'_> {
             AttributeKind::AnnotationDefault => {
                 let mut value = ElementValue::read(&*attr.info)?;
                 self.remap_element_value(index, &mut value);
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(attr.len());
                 value.write(&mut buf)?;
                 attr.info = Cow::Owned(buf);
             }
             AttributeKind::Record => {
                 let mut reader = RecordReader::new(&*attr.info)?;
-                let mut buf = Vec::new();
+                let mut buf = Vec::with_capacity(attr.len());
                 while let Some(mut entry) = reader.next().transpose()? {
                     if let AttrContext::Class(class) = attr_cx {
                         (entry.name_idx, entry.desc_idx) =
@@ -624,26 +628,26 @@ impl ConstPoolBuffer<'_> {
     ///
     /// The result is cached per kind, so one entry used in several roles gets remapped
     /// individually for each of them.
+    #[inline]
     fn remap_utf8<F>(&mut self, idx: NonZero<u16>, kind: RemapKind, f: F) -> NonZero<u16>
     where
         F: FnOnce(&str) -> Option<SmolStr>,
     {
         let i = idx.get() as usize;
-        let Some(Some(ConstantPoolEntry::Utf8(src))) = self.entries.get(i) else {
-            return idx;
-        };
-        let Ok(decoded) = mutf8::decode(src.0) else {
-            return idx;
-        };
-        let Some(state) = self.states.get_mut(i) else {
-            return idx;
-        };
-        state
-            .remap(kind, &mut self.appends, || f(&decoded))
-            .unwrap_or(idx)
+        if let Some(Some(ConstantPoolEntry::Utf8(src))) = self.entries.get(i)
+            && let Ok(decoded) = mutf8::decode(src.0)
+            && let Some(state) = self.states.get_mut(i)
+        {
+            state
+                .remap(kind, &mut self.appends, || f(&decoded))
+                .unwrap_or(idx)
+        } else {
+            idx
+        }
     }
 
     /// Decodes the `Utf8` entry at `idx`.
+    #[inline]
     fn utf8(&self, idx: NonZero<u16>) -> Option<Cow<'_, str>> {
         match self.entries.get(idx.get() as usize) {
             Some(Some(ConstantPoolEntry::Utf8(name))) => mutf8::decode(name.0).ok(),

@@ -235,11 +235,18 @@ struct DynResolver {
 
 impl DynResolver {
     fn resolve<'a>(&'a self, req: &str, index: &Index) -> Option<&'a str> {
+        // avoid unneeded requests
+        for c in req.chars().rev() {
+            match c {
+                '0'..='9' => (),
+                '$' => break,
+                _ => return None,
+            }
+        }
+
         if let Some(target) = self.map.get_sync(req) {
             Some(unsafe { &*std::ptr::from_ref(&**target) })
-        } else if let Some((base, suffix)) = req.rsplit_once('$')
-            && suffix.chars().next().is_some_and(|c| c.is_ascii_digit())
-        {
+        } else if let Some((base, suffix)) = req.rsplit_once('$') {
             let mut changed = false;
             let base_mapped = index.remap_class_name_tracked(base, &mut changed);
             if !changed {

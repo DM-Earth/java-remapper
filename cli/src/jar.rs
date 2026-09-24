@@ -13,8 +13,8 @@ use crate::Error;
 const META_INF: &str = "META-INF";
 
 pub(crate) fn remap_jar<R, W>(
-    mut src: ZipArchive<R>,
-    mut dst: &mut ZipWriter<W>,
+    src: &mut ZipArchive<R>,
+    dst: &mut ZipWriter<W>,
     index: &Index,
     cx: &mut Context,
 ) -> Result<(), Error>
@@ -23,11 +23,40 @@ where
     W: Write + Seek,
 {
     let mut parents = HashSet::new();
-    // (raw name, classfile)
-    let mut classes: Vec<(String, Box<[u8]>, SimpleFileOptions)> = Vec::new();
+    let mut classes = Vec::new();
+    collect_files(&mut *src, dst, index, &mut parents, &mut classes)?;
+    cx.populate_inherency(classes.iter().map(|(_, cl, _)| cl));
+    remap_classes(dst, &classes, index, cx)?;
 
+    // finalize directories
     let mut meta_inf_over = false;
+    for dir in &parents {
+        if !meta_inf_over && dir == Path::new(META_INF) {
+            meta_inf_over = true;
+            continue;
+        }
+        dst.add_directory_from_path(
+            dir,
+            // unneeded for directories
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )?;
+    }
 
+    Ok(())
+}
+
+fn collect_files<R, W>(
+    src: &mut ZipArchive<R>,
+    dst: &mut ZipWriter<W>,
+    index: &Index,
+    parents: &mut HashSet<PathBuf>,
+    classes: &mut Vec<(PathBuf, Box<[u8]>, SimpleFileOptions)>,
+) -> Result<(), Error>
+where
+    R: Read + Seek,
+    W: Write + Seek,
+{
+    let mut meta_inf_over = false;
     for id in 0..src.len() {
         let mut file = src.by_index(id)?;
         let Some(path) = file.enclosed_name() else {
@@ -54,7 +83,7 @@ where
                             file.options()
                                 .last_modified_time(DateTime::default_for_write()),
                         )?;
-                        process_manifest(BufReader::new(&mut file), &mut dst, index)?;
+                        process_manifest(BufReader::new(&mut file), &mut *dst, index)?;
                         continue;
                     }
                     _ => (),
@@ -66,10 +95,16 @@ where
             {
                 let mut buf = Vec::with_capacity(file.size() as usize);
                 file.read_to_end(&mut buf)?;
-                classes.push((name, buf.into_boxed_slice(), file.options()));
+                let mapped_name = index.remap_class_name(&name);
+                let path = PathBuf::from(format!("{mapped_name}.class"));
+                if let Some(parent) = path.parent() {
+                    for p in parent.ancestors() {
+                        parents.insert(p.to_owned());
+                    }
+                }
+                classes.push((path, buf.into_boxed_slice(), file.options()));
             } else {
-                dst.start_file(file.name(), file.options())?;
-                std::io::copy(&mut file, &mut dst)?;
+                dst.raw_copy_file(file)?;
                 if let Some(parent) = parent {
                     for p in parent.ancestors() {
                         parents.insert(p.to_owned());
@@ -78,41 +113,26 @@ where
             }
         }
     }
+    Ok(())
+}
 
-    cx.populate_inherency(classes.iter().map(|(_, cl, _)| cl));
-
-    let mut wbuf = Vec::new();
-    let mut rbuf = remapper::Buffer::new();
-    for (orig, src, opts) in &classes {
-        wbuf.clear();
-        let mapped_name = index.remap_class_name(orig);
-        let path = PathBuf::from(format!("{mapped_name}.class"));
-        if let Some(parent) = path.parent() {
-            for p in parent.ancestors() {
-                parents.insert(p.to_owned());
-            }
-        }
-        remapper::remap(src, &mut wbuf, index, &mut rbuf, &*cx)?;
-        dst.start_file_from_path(
-            &path,
-            opts.last_modified_time(DateTime::default_for_write()),
-        )?;
-        dst.write_all(&wbuf)?;
+fn remap_classes<W>(
+    dst: &mut ZipWriter<W>,
+    classes: &[(PathBuf, Box<[u8]>, SimpleFileOptions)],
+    index: &Index,
+    cx: &Context,
+) -> Result<(), Error>
+where
+    W: Write + Seek,
+{
+    let mut buf = Vec::new();
+    let mut remap_buf = remapper::Buffer::new();
+    for (path, src, opts) in classes {
+        buf.clear();
+        remapper::remap(src, &mut buf, index, &mut remap_buf, cx)?;
+        dst.start_file_from_path(path, opts.last_modified_time(DateTime::default_for_write()))?;
+        dst.write_all(&buf)?;
     }
-
-    let mut meta_inf_over = false;
-    for dir in &parents {
-        if !meta_inf_over && dir == Path::new(META_INF) {
-            meta_inf_over = true;
-            continue;
-        }
-        dst.add_directory_from_path(
-            dir,
-            // unneeded for directories
-            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
-        )?;
-    }
-
     Ok(())
 }
 

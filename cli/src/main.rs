@@ -40,7 +40,7 @@ enum Error {
     Bytecode(remapper::Error),
     Zip(zip::result::ZipError),
 
-    MappingParse(Box<dyn std::error::Error>),
+    MappingParse(Box<dyn std::error::Error + Send>),
 }
 
 impl Display for Error {
@@ -199,16 +199,16 @@ fn main() -> Result<(), Error> {
         }
         Input::Jar(path) => {
             let file = std::fs::File::open(path)?;
-            let archive = ZipArchive::new(file)?;
+            let mut archive = ZipArchive::new(file)?;
             if let Some(out) = &args.output {
                 let mut dst = ZipWriter::new(std::fs::File::create(out)?);
                 dst.set_raw_comment(archive.comment().into())?;
-                jar::remap_jar(archive, &mut dst, &index, &mut cx)?;
+                jar::remap_jar(&mut archive, &mut dst, &index, &mut cx)?;
                 dst.finish()?;
             } else {
                 let mut dst = ZipWriter::new_stream(stdout());
                 dst.set_raw_comment(archive.comment().into())?;
-                jar::remap_jar(archive, &mut dst, &index, &mut cx)?;
+                jar::remap_jar(&mut archive, &mut dst, &index, &mut cx)?;
                 dst.finish()?;
             }
         }
