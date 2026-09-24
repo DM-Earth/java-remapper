@@ -6,7 +6,10 @@ use std::{
     path::PathBuf,
 };
 
-use remapper::Index;
+use remapper::{Context, Index};
+use zip::{ZipArchive, ZipWriter};
+
+mod jar;
 
 #[non_exhaustive]
 enum MappingFormat {
@@ -16,17 +19,26 @@ enum MappingFormat {
 struct Args {
     fmt: MappingFormat,
     mapping_path: PathBuf,
+    input: Input,
     output: Option<PathBuf>,
+}
+
+enum Input {
+    Class(Option<PathBuf>),
+    Jar(PathBuf),
 }
 
 #[derive(Debug)]
 enum Error {
     MissingMapping,
     MissingOutput,
+    NonUtf8,
+    MissingInput,
+    StdinUnsupported,
     UnknownArg(String),
     Io(std::io::Error),
     Bytecode(remapper::Error),
-    NonUtf8,
+    Zip(zip::result::ZipError),
 
     MappingParse(Box<dyn std::error::Error>),
 }
@@ -41,6 +53,9 @@ impl Display for Error {
             Error::Bytecode(error) => write!(f, "bytecode parsing error: {error}"),
             Error::NonUtf8 => write!(f, "not an UTF-8 argument"),
             Error::MappingParse(error) => write!(f, "mapping parsing error: {error}"),
+            Error::Zip(err) => write!(f, "zip manipulation error: {err}"),
+            Error::MissingInput => write!(f, "missing input file"),
+            Error::StdinUnsupported => write!(f, "stdin is not supported for the requested format"),
         }
     }
 }
@@ -51,6 +66,7 @@ impl std::error::Error for Error {
             Error::Io(error) => Some(error),
             Error::Bytecode(error) => Some(error),
             Error::MappingParse(error) => Some(&**error),
+            Error::Zip(error) => Some(error),
             _ => None,
         }
     }
@@ -68,6 +84,12 @@ impl From<remapper::Error> for Error {
     }
 }
 
+impl From<zip::result::ZipError> for Error {
+    fn from(value: zip::result::ZipError) -> Self {
+        Self::Zip(value)
+    }
+}
+
 #[cold]
 fn print_help() {
     const MSG: &str = include_str!("../help.txt");
@@ -79,6 +101,7 @@ fn parse_args(raw: impl IntoIterator<Item = impl Into<std::ffi::OsString>>) -> R
     let mut fmt = None;
     let mut mapping_path = None;
     let mut output = None;
+    let mut input = Input::Class(None);
 
     let raw = clap_lex::RawArgs::new(raw);
     let mut cursor = raw.cursor();
@@ -94,6 +117,22 @@ fn parse_args(raw: impl IntoIterator<Item = impl Into<std::ffi::OsString>>) -> R
                         .map(|p| p.to_value_os())
                         .ok_or(Error::MissingMapping)?;
                     mapping_path = Some(val.into());
+                }
+                "class" => {
+                    let val = raw.next(&mut cursor).ok_or(Error::MissingInput)?;
+                    input = if val.is_stdio() {
+                        Input::Class(None)
+                    } else {
+                        Input::Class(Some(val.to_value_os().into()))
+                    }
+                }
+                "jar" => {
+                    let val = raw.next(&mut cursor).ok_or(Error::MissingInput)?;
+                    input = if val.is_stdio() {
+                        return Err(Error::StdinUnsupported);
+                    } else {
+                        Input::Jar(val.to_value_os().into())
+                    }
                 }
                 "output" => {
                     let val = raw.next(&mut cursor).ok_or(Error::MissingOutput)?;
@@ -125,30 +164,54 @@ fn parse_args(raw: impl IntoIterator<Item = impl Into<std::ffi::OsString>>) -> R
         fmt: fmt.ok_or(Error::MissingMapping)?,
         mapping_path: mapping_path.ok_or(Error::MissingMapping)?,
         output,
+        input,
     })
 }
 
 fn main() -> Result<(), Error> {
     let args = parse_args(std::env::args_os())?;
-    let mut index: Index = match args.fmt {
+    let index: Index = match args.fmt {
         MappingFormat::Tiny2 => mapping_serde_tiny2::from_reader(BufReader::new(
             std::fs::File::open(&args.mapping_path)?,
         ))
         .map_err(|err| Error::MappingParse(Box::new(err)))?
         .unwrap(),
     };
-    let mut src = Vec::new();
-    stdin().read_to_end(&mut src)?;
-    index.populate_inherency([&src]);
-    let mut dst = Vec::with_capacity(src.len());
-    let mut buf = remapper::Buffer::new();
-    remapper::remap(&src, &mut dst, &index, &mut buf)?;
 
-    if let Some(output) = args.output {
-        std::fs::write(output, dst)?;
-    } else {
-        let mut stdout = stdout();
-        stdout.write_all(&dst)?;
+    let mut cx = Context::new();
+    match &args.input {
+        Input::Class(path) => {
+            let mut src = Vec::new();
+            match path {
+                Some(path) => std::fs::File::open(path)?.read_to_end(&mut src),
+                None => stdin().read_to_end(&mut src),
+            }?;
+            cx.populate_inherency([&src]);
+            let mut dst = Vec::with_capacity(src.len());
+            let mut buf = remapper::Buffer::new();
+            remapper::remap(&src, &mut dst, &index, &mut buf, &cx)?;
+            if let Some(output) = args.output {
+                std::fs::write(output, dst)?;
+            } else {
+                let mut stdout = stdout();
+                stdout.write_all(&dst)?;
+            }
+        }
+        Input::Jar(path) => {
+            let file = std::fs::File::open(path)?;
+            let archive = ZipArchive::new(file)?;
+            if let Some(out) = &args.output {
+                let mut dst = ZipWriter::new(std::fs::File::create(out)?);
+                dst.set_raw_comment(archive.comment().into())?;
+                jar::remap_jar(archive, &mut dst, &index, &mut cx)?;
+                dst.finish()?;
+            } else {
+                let mut dst = ZipWriter::new_stream(stdout());
+                dst.set_raw_comment(archive.comment().into())?;
+                jar::remap_jar(archive, &mut dst, &index, &mut cx)?;
+                dst.finish()?;
+            }
+        }
     }
     Ok(())
 }

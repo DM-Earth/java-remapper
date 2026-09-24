@@ -10,11 +10,15 @@ use mapping_serde::{Deserialize, Deserializer, de::Visitor};
 use simd_cesu8::mutf8;
 use smol_str::SmolStr;
 
-/// Naming mapping and auxiliary information about the classes.
+/// Naming mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Index {
     pub(crate) classes: HashMap<SmolStr, Class>,
-    /// Parent class/interfaces of classes.
+}
+
+/// Auxiliary information about the classes being remapped.
+#[derive(Default, Debug, Clone)]
+pub struct Context {
     pub(crate) inherency: HashMap<SmolStr, Vec<SmolStr>>,
 }
 
@@ -61,13 +65,102 @@ impl Index {
 
         let mut index = Self {
             classes: HashMap::new(),
-            inherency: HashMap::new(),
         };
         while deserializer
             .deserialize_class(RootVisitor(&mut index))?
             .is_some()
         {}
         Ok(index)
+    }
+
+    pub(crate) fn remap_class_name_tracked<'a>(
+        &'a self,
+        src: &'a str,
+        changed: &mut bool,
+    ) -> &'a str {
+        self.classes
+            .get(src)
+            .and_then(|c| c.name.as_deref())
+            .inspect(|_| *changed = true)
+            .unwrap_or(src)
+    }
+
+    /// Remaps the given class name `src` to the desired value.
+    pub fn remap_class_name<'a>(&'a self, src: &'a str) -> &'a str {
+        self.remap_class_name_tracked(src, &mut false)
+    }
+
+    fn remap_field_name_inner<'s, 'a>(
+        &'s self,
+        class: &'a str,
+        orig: &str,
+        protection: &mut HashSet<&'a str>,
+        cx: &Context,
+    ) -> Option<&'s SmolStr> {
+        if !protection.insert(class) {
+            return None;
+        }
+        self.classes
+            .get(class)
+            .and_then(|cl| cl.fields.get(orig))
+            .or_else(|| {
+                for cl in cx.inherency.get(class)? {
+                    if let Some(dst) = self.remap_field_name(cl, orig, cx) {
+                        return Some(dst);
+                    }
+                }
+                None
+            })
+    }
+
+    pub(crate) fn remap_field_name<'s>(
+        &'s self,
+        class: &str,
+        orig: &str,
+        cx: &Context,
+    ) -> Option<&'s SmolStr> {
+        let mut protection = HashSet::with_capacity(4);
+        self.remap_field_name_inner(class, orig, &mut protection, cx)
+    }
+
+    fn remap_method_name_inner<'s, 'a>(
+        &'s self,
+        class: &'a str,
+        orig: &DescKey,
+        protection: &mut HashSet<&'a str>,
+        cx: &Context,
+    ) -> Option<&'s Method> {
+        if !protection.insert(class) {
+            return None;
+        }
+        self.classes
+            .get(class)
+            .and_then(|cl| cl.methods.get(orig))
+            .or_else(|| {
+                for cl in cx.inherency.get(class)? {
+                    if let Some(dst) = self.remap_method_name(cl, orig, cx) {
+                        return Some(dst);
+                    }
+                }
+                None
+            })
+    }
+
+    pub(crate) fn remap_method_name<'s>(
+        &'s self,
+        class: &str,
+        orig: &DescKey,
+        cx: &Context,
+    ) -> Option<&'s Method> {
+        let mut protection = HashSet::with_capacity(4);
+        self.remap_method_name_inner(class, orig, &mut protection, cx)
+    }
+}
+
+impl Context {
+    /// Creates an empty remapper context.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     fn populate_inherency_inner(
@@ -115,72 +208,6 @@ impl Index {
         for buf in iter {
             let _ = self.populate_inherency_inner(buf.as_ref(), &mut cp_cap);
         }
-    }
-
-    pub(crate) fn remap_class_name<'a>(&'a self, src: &'a str, changed: &mut bool) -> &'a str {
-        self.classes
-            .get(src)
-            .and_then(|c| c.name.as_deref())
-            .inspect(|_| *changed = true)
-            .unwrap_or(src)
-    }
-
-    fn remap_field_name_inner<'s, 'a>(
-        &'s self,
-        class: &'a str,
-        orig: &str,
-        protection: &mut HashSet<&'a str>,
-    ) -> Option<&'s SmolStr> {
-        if !protection.insert(class) {
-            return None;
-        }
-        self.classes
-            .get(class)
-            .and_then(|cl| cl.fields.get(orig))
-            .or_else(|| {
-                for cl in self.inherency.get(class)? {
-                    if let Some(dst) = self.remap_field_name(cl, orig) {
-                        return Some(dst);
-                    }
-                }
-                None
-            })
-    }
-
-    pub(crate) fn remap_field_name<'s>(&'s self, class: &str, orig: &str) -> Option<&'s SmolStr> {
-        let mut protection = HashSet::with_capacity(4);
-        self.remap_field_name_inner(class, orig, &mut protection)
-    }
-
-    fn remap_method_name_inner<'s, 'a>(
-        &'s self,
-        class: &'a str,
-        orig: &DescKey,
-        protection: &mut HashSet<&'a str>,
-    ) -> Option<&'s Method> {
-        if !protection.insert(class) {
-            return None;
-        }
-        self.classes
-            .get(class)
-            .and_then(|cl| cl.methods.get(orig))
-            .or_else(|| {
-                for cl in self.inherency.get(class)? {
-                    if let Some(dst) = self.remap_method_name(cl, orig) {
-                        return Some(dst);
-                    }
-                }
-                None
-            })
-    }
-
-    pub(crate) fn remap_method_name<'s>(
-        &'s self,
-        class: &str,
-        orig: &DescKey,
-    ) -> Option<&'s Method> {
-        let mut protection = HashSet::with_capacity(4);
-        self.remap_method_name_inner(class, orig, &mut protection)
     }
 }
 

@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-remapper = { path = "../", package = "java-remapper" }
 clap_lex = "1.1"
+smol_str = "0.3"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+remapper = { path = "../", package = "java-remapper" }
 mapping-serde = { version = "0.1", path = "../../mapping-serde", package = "java-mapping-serde" }
 mapping-serde-tiny2 = { version = "0.1", path = "../../mapping-serde/formats/tiny2", package = "java-mapping-serde-tiny2" }
 

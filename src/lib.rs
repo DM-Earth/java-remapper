@@ -27,7 +27,7 @@ use crate::index::{DescKey, Method};
 
 mod index;
 
-pub use index::Index;
+pub use index::{Context, Index};
 
 pub use classfile::Error;
 
@@ -170,6 +170,11 @@ pub struct Buffer<'a> {
     field_refs: Vec<(NonZero<u16>, NonZero<u16>)>,
     method_refs: Vec<(NonZero<u16>, NonZero<u16>)>,
 
+    // dyns
+    dynamic_fields: Vec<NonZero<u16>>,
+    dynamic_methods: Vec<NonZero<u16>>,
+    method_types: Vec<NonZero<u16>>,
+
     // stores
     const_pool: ConstPoolBuffer<'a>,
     interfaces: Vec<NonZero<u16>>,
@@ -276,6 +281,9 @@ impl Buffer<'_> {
             classes: Vec::new(),
             field_refs: Vec::new(),
             method_refs: Vec::new(),
+            dynamic_fields: Vec::new(),
+            dynamic_methods: Vec::new(),
+            method_types: Vec::new(),
 
             const_pool: ConstPoolBuffer {
                 states: Vec::new(),
@@ -297,6 +305,10 @@ impl Buffer<'_> {
         self.field_refs.clear();
         self.method_refs.clear();
 
+        self.dynamic_fields.clear();
+        self.dynamic_methods.clear();
+        self.method_types.clear();
+
         self.const_pool.states.clear();
         self.const_pool.entries.clear();
         self.const_pool.appends.start = NonZero::new(1).unwrap();
@@ -310,15 +322,22 @@ impl Buffer<'_> {
 }
 
 impl ConstPoolBuffer<'_> {
-    fn remap_attribute(&mut self, attr: &mut CowAttribute<'_>, index: &Index, cx: AttrContext<'_>) {
-        let _ = self.try_remap_attribute(attr, index, cx);
+    fn remap_attribute(
+        &mut self,
+        attr: &mut CowAttribute<'_>,
+        index: &Index,
+        attr_cx: AttrContext<'_>,
+        cx: &Context,
+    ) {
+        let _ = self.try_remap_attribute(attr, index, attr_cx, cx);
     }
 
     fn try_remap_attribute(
         &mut self,
         attr: &mut CowAttribute<'_>,
         index: &Index,
-        cx: AttrContext<'_>,
+        attr_cx: AttrContext<'_>,
+        cx: &Context,
     ) -> Result<(), Error> {
         let Some(kind) = self
             .states
@@ -342,7 +361,7 @@ impl ConstPoolBuffer<'_> {
                 let mut writer = writer.finish()?;
                 while let Some(nested) = reader.next().transpose()? {
                     let mut nested = CowAttribute::from(nested);
-                    self.try_remap_attribute(&mut nested, index, cx)?;
+                    self.try_remap_attribute(&mut nested, index, attr_cx, cx)?;
                     writer.push(&nested.as_attr())?;
                 }
                 writer.finish()?;
@@ -375,12 +394,12 @@ impl ConstPoolBuffer<'_> {
                 // The `Class` entry referred by `class_idx` is rewritten in place, and the
                 // enclosing method is a `NameAndType` entry, which is rewritten here.
                 if let Some(method_idx) = method_idx {
-                    self.remap_name_and_type(index, class_idx, method_idx, true);
+                    self.remap_name_and_type(index, class_idx, method_idx, true, cx);
                 }
             }
             AttributeKind::Signature => {
                 let ConstantPoolIndex(idx) = ConstantPoolIndex::read(&*attr.info)?;
-                let remapped = match cx {
+                let remapped = match attr_cx {
                     AttrContext::Class(_) => {
                         self.remap_utf8(idx, RemapKind::ClassSignature, |sig| {
                             remap_class_sig(index, sig).ok().flatten()
@@ -401,7 +420,7 @@ impl ConstPoolBuffer<'_> {
                 attr.info = Cow::Owned(remapped.get().to_be_bytes().to_vec());
             }
             AttributeKind::LocalVariableTable => {
-                if let AttrContext::Method(method) = cx {
+                if let AttrContext::Method(method) = attr_cx {
                     let mut reader = LocalVariableTableReader::new(&*attr.info)?;
                     let mut buf = Vec::new();
                     let mut writer = LocalVariableTableWriter::new(&mut buf)?;
@@ -423,7 +442,7 @@ impl ConstPoolBuffer<'_> {
                 }
             }
             AttributeKind::LocalVariableTypeTable => {
-                if let AttrContext::Method(method) = cx {
+                if let AttrContext::Method(method) = attr_cx {
                     let mut reader = LocalVariableTypeTableReader::new(&*attr.info)?;
                     let mut buf = Vec::new();
                     let mut writer = LocalVariableTypeTableWriter::new(&mut buf)?;
@@ -525,14 +544,19 @@ impl ConstPoolBuffer<'_> {
                 let mut reader = RecordReader::new(&*attr.info)?;
                 let mut buf = Vec::new();
                 while let Some(mut entry) = reader.next().transpose()? {
-                    if let AttrContext::Class(class) = cx {
+                    if let AttrContext::Class(class) = attr_cx {
                         (entry.name_idx, entry.desc_idx) =
-                            self.remap_field(index, class, entry.name_idx, entry.desc_idx);
+                            self.remap_field(index, class, entry.name_idx, entry.desc_idx, cx);
                     }
                     let mut attrs = Vec::with_capacity(entry.attributes.len());
                     for sub in &*entry.attributes {
                         let mut sub = CowAttribute::from(*sub);
-                        self.try_remap_attribute(&mut sub, index, AttrContext::RecordComponent)?;
+                        self.try_remap_attribute(
+                            &mut sub,
+                            index,
+                            AttrContext::RecordComponent,
+                            cx,
+                        )?;
                         attrs.push(sub);
                     }
                     // Encodes a record component the same way as `ComponentInfo` does.
@@ -640,8 +664,9 @@ impl ConstPoolBuffer<'_> {
         index: &Index,
         class: NonZero<u16>,
         ntid: NonZero<u16>,
+        cx: &Context,
     ) {
-        self.remap_name_and_type(index, class, ntid, false);
+        self.remap_name_and_type(index, class, ntid, false, cx);
     }
 
     fn remap_method_name_and_type(
@@ -649,8 +674,9 @@ impl ConstPoolBuffer<'_> {
         index: &Index,
         class: NonZero<u16>,
         ntid: NonZero<u16>,
+        cx: &Context,
     ) {
-        self.remap_name_and_type(index, class, ntid, true);
+        self.remap_name_and_type(index, class, ntid, true, cx);
     }
 
     /// Rewrites the `NameAndType` entry at `ntid` with the mapped name and descriptor.
@@ -660,6 +686,7 @@ impl ConstPoolBuffer<'_> {
         class_idx: NonZero<u16>,
         ntid: NonZero<u16>,
         method: bool,
+        cx: &Context,
     ) {
         let idx = ntid.get() as usize;
         if self.states.get(idx).is_none_or(|state| state.modified) {
@@ -677,10 +704,10 @@ impl ConstPoolBuffer<'_> {
         let class = self.class_name(class_idx).map(SmolStr::from);
         let (name_index, descriptor_index) = if method {
             let (_, name_index, descriptor_index) =
-                self.remap_method(index, class.as_deref(), name_index, descriptor_index);
+                self.remap_method(index, class.as_deref(), name_index, descriptor_index, cx);
             (name_index, descriptor_index)
         } else {
-            self.remap_field(index, class.as_deref(), name_index, descriptor_index)
+            self.remap_field(index, class.as_deref(), name_index, descriptor_index, cx)
         };
         self.entries[idx] = Some(ConstantPoolEntry::NameAndType {
             name_index,
@@ -753,6 +780,7 @@ impl ConstPoolBuffer<'_> {
         class: Option<&str>,
         ni: NonZero<u16>,
         di: NonZero<u16>,
+        cx: &Context,
     ) -> (NonZero<u16>, NonZero<u16>) {
         let desc_idx = self.remap_utf8(di, RemapKind::FieldType, |desc| {
             remap_field_type(index, desc).ok().flatten()
@@ -760,7 +788,7 @@ impl ConstPoolBuffer<'_> {
         let Some(name) = self.utf8(ni) else {
             return (ni, desc_idx);
         };
-        let Some(dst) = class.and_then(|cl| index.remap_field_name(cl, &name)) else {
+        let Some(dst) = class.and_then(|cl| index.remap_field_name(cl, &name, cx)) else {
             return (ni, desc_idx);
         };
         let name_idx = self.remap_utf8(ni, RemapKind::FieldName, |_| Some(dst.clone()));
@@ -773,6 +801,7 @@ impl ConstPoolBuffer<'_> {
         class: Option<&str>,
         ni: NonZero<u16>,
         di: NonZero<u16>,
+        cx: &Context,
     ) -> (Option<&'i Method>, NonZero<u16>, NonZero<u16>) {
         let desc_idx = self.remap_utf8(di, RemapKind::MethodDescriptor, |desc| {
             remap_method_desc(index, desc).ok().flatten()
@@ -787,6 +816,7 @@ impl ConstPoolBuffer<'_> {
                     name: name.to_smolstr(),
                     desc: desc.to_smolstr(),
                 },
+                cx,
             )
         }) else {
             return (None, ni, desc_idx);
@@ -803,7 +833,7 @@ fn remap_field_type_raw<'a>(
 ) -> FieldType<'a> {
     match src {
         FieldType::Primitive(val) => FieldType::Primitive(val),
-        FieldType::Class(cl) => FieldType::Class(index.remap_class_name(cl, changed)),
+        FieldType::Class(cl) => FieldType::Class(index.remap_class_name_tracked(cl, changed)),
         FieldType::Array(ty) => {
             FieldType::Array(Box::new(remap_field_type_raw(index, *ty, changed)))
         }
@@ -859,7 +889,7 @@ fn remap_type_sig<'a>(
     match src {
         TypeSignature::Class { sig, suffix } => TypeSignature::Class {
             sig: ReducedClassTypeSignature {
-                name: index.remap_class_name(sig.name, changed),
+                name: index.remap_class_name_tracked(sig.name, changed),
                 args: {
                     let mut args = sig.args;
                     remap_type_args(index, &mut args, changed);
@@ -867,7 +897,7 @@ fn remap_type_sig<'a>(
                 },
             },
             suffix: suffix.map(|suffix| ReducedClassTypeSignature {
-                name: index.remap_class_name(suffix.name, changed),
+                name: index.remap_class_name_tracked(suffix.name, changed),
                 args: {
                     let mut args = suffix.args;
                     remap_type_args(index, &mut args, changed);
@@ -1005,17 +1035,12 @@ pub fn remap<'a>(
     dst: &mut Vec<u8>,
     index: &Index,
     buf: &mut Buffer<'a>,
+    cx: &Context,
 ) -> Result<(), Error> {
     buf.clear();
     let reader = Reader::new(src);
 
     let (header, mut reader) = reader.header()?;
-
-    // These entries are not reachable through `FieldRef` and `MethodRef` entries, so their
-    // constant pool indices are collected to be rewritten later.
-    let mut dynamic_fields = Vec::new();
-    let mut dynamic_methods = Vec::new();
-    let mut method_types = Vec::new();
 
     while let Some((idx, entry)) = reader.next().transpose()? {
         match entry {
@@ -1035,12 +1060,12 @@ pub fn remap<'a>(
             ConstantPoolEntry::Dynamic {
                 name_and_type_index,
                 ..
-            } => dynamic_fields.push(name_and_type_index),
+            } => buf.dynamic_fields.push(name_and_type_index),
             ConstantPoolEntry::InvokeDynamic {
                 name_and_type_index,
                 ..
-            } => dynamic_methods.push(name_and_type_index),
-            ConstantPoolEntry::MethodType(_) => method_types.push(idx),
+            } => buf.dynamic_methods.push(name_and_type_index),
+            ConstantPoolEntry::MethodType(_) => buf.method_types.push(idx),
             _ => (),
         }
 
@@ -1081,20 +1106,21 @@ pub fn remap<'a>(
     let this_class = this_class.as_deref();
 
     for &(ci, nti) in &buf.field_refs {
-        buf.const_pool.remap_field_name_and_type(index, ci, nti);
+        buf.const_pool.remap_field_name_and_type(index, ci, nti, cx);
     }
     for &(ci, nti) in &buf.method_refs {
-        buf.const_pool.remap_method_name_and_type(index, ci, nti);
-    }
-    for &nti in &dynamic_fields {
         buf.const_pool
-            .remap_name_and_type(index, metadata.this_class, nti, false);
+            .remap_method_name_and_type(index, ci, nti, cx);
     }
-    for &nti in &dynamic_methods {
+    for &nti in &buf.dynamic_fields {
         buf.const_pool
-            .remap_name_and_type(index, metadata.this_class, nti, true);
+            .remap_name_and_type(index, metadata.this_class, nti, false, cx);
     }
-    for &idx in &method_types {
+    for &nti in &buf.dynamic_methods {
+        buf.const_pool
+            .remap_name_and_type(index, metadata.this_class, nti, true, cx);
+    }
+    for &idx in &buf.method_types {
         buf.const_pool.remap_method_type(index, idx);
     }
 
@@ -1110,12 +1136,13 @@ pub fn remap<'a>(
             this_class,
             header.name_index,
             header.descriptor_index,
+            cx,
         );
         let mut attrs = Vec::with_capacity(fr.len());
         while let Some(attr) = fr.next().transpose()? {
             let mut attr = CowAttribute::from(attr);
             buf.const_pool
-                .remap_attribute(&mut attr, index, AttrContext::Field);
+                .remap_attribute(&mut attr, index, AttrContext::Field, cx);
             attrs.push(attr);
         }
         buf.fields.push((header, attrs));
@@ -1129,6 +1156,7 @@ pub fn remap<'a>(
             this_class,
             header.name_index,
             header.descriptor_index,
+            cx,
         );
         header.name_index = name_index;
         header.descriptor_index = descriptor_index;
@@ -1136,7 +1164,7 @@ pub fn remap<'a>(
         while let Some(attr) = mr.next().transpose()? {
             let mut attr = CowAttribute::from(attr);
             buf.const_pool
-                .remap_attribute(&mut attr, index, AttrContext::Method(this_method));
+                .remap_attribute(&mut attr, index, AttrContext::Method(this_method), cx);
             attrs.push(attr);
         }
         buf.methods.push((header, attrs));
@@ -1146,7 +1174,7 @@ pub fn remap<'a>(
     while let Some(attr) = reader.next().transpose()? {
         let mut attr = CowAttribute::from(attr);
         buf.const_pool
-            .remap_attribute(&mut attr, index, AttrContext::Class(this_class));
+            .remap_attribute(&mut attr, index, AttrContext::Class(this_class), cx);
         buf.attrs.push(attr);
     }
     drop(reader);
