@@ -14,6 +14,13 @@ java-bin-name = { version = "0.3", path = "../java-bin-name" }
 smol_str = "0.3"
 simd_cesu8 = "1.2"
 scc = "3.8"
+ahash = { version = "0.8", optional = true }
+rustc-hash = { version = "2.1", optional = true }
+
+[features]
+default = ["ahash"]
+ahash = ["dep:ahash"]
+fx-hash = ["dep:rustc-hash"]
 
 [lints]
 workspace = true

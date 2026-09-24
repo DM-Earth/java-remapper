@@ -11,26 +11,28 @@ use mapping_serde::{Deserialize, Deserializer, de::Visitor};
 use simd_cesu8::mutf8;
 use smol_str::SmolStr;
 
+use crate::RandomState;
+
 /// Naming mapping.
 #[derive(Debug)]
 pub struct Index {
-    pub(crate) classes: HashMap<SmolStr, Class>,
+    pub(crate) classes: HashMap<SmolStr, Class, RandomState>,
     dyn_resolver: DynResolver,
 }
 
 /// Auxiliary information about the classes being remapped.
 #[derive(Default, Debug, Clone)]
 pub struct Context {
-    pub(crate) inherency: HashMap<SmolStr, Vec<SmolStr>>,
+    pub(crate) inherency: HashMap<SmolStr, Vec<SmolStr>, RandomState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Class {
     /// Mapped name.
     pub(crate) name: Option<SmolStr>,
-    pub(crate) methods: HashMap<DescKey, Method>,
+    pub(crate) methods: HashMap<DescKey, Method, RandomState>,
     /// Mapped field names.
-    pub(crate) fields: HashMap<SmolStr, SmolStr>,
+    pub(crate) fields: HashMap<SmolStr, SmolStr, RandomState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,7 +68,7 @@ impl Index {
         let _: () = Checker::<D>::CHECK;
 
         let mut index = Self {
-            classes: HashMap::new(),
+            classes: HashMap::default(),
             dyn_resolver: Default::default(),
         };
         while deserializer
@@ -228,7 +230,7 @@ impl Context {
 #[derive(Debug, Default)]
 struct DynResolver {
     // SAFETY: do not remove entries
-    map: scc::HashMap<SmolStr, Pin<Box<str>>>,
+    map: scc::HashMap<SmolStr, Pin<Box<str>>, RandomState>,
 }
 
 impl DynResolver {
@@ -312,8 +314,8 @@ impl<'de> Visitor<'de> for RootVisitor<'_> {
             .entry(access.src().into())
             .or_insert_with(|| Class {
                 name: access.dst().next().map(Into::into),
-                methods: HashMap::new(),
-                fields: HashMap::new(),
+                methods: HashMap::default(),
+                fields: HashMap::default(),
             });
         let mut content = access.content();
         while content.deserialize_any(ClassVisitor(entry))?.is_some() {}

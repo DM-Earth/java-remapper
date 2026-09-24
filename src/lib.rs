@@ -31,6 +31,12 @@ pub use index::{Context, Index};
 
 pub use classfile::Error;
 
+type RandomState = cfg_select! {
+    feature = "fx-hash" => rustc_hash::FxBuildHasher,
+    feature = "ahash" => ahash::RandomState,
+    _ => std::hash::RandomState,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum AttributeKind {
     Code,
@@ -82,12 +88,12 @@ struct ConstState {
     /// Whether the entry is modified.
     modified: bool,
 
-    remaps: HashMap<SmolStr, NonZero<u16>>,
-    kinds: HashMap<RemapKind, Option<NonZero<u16>>>,
+    remaps: HashMap<SmolStr, NonZero<u16>, RandomState>,
+    kinds: HashMap<RemapKind, Option<NonZero<u16>>, RandomState>,
 }
 
 fn remap_state_raw(
-    remaps: &mut HashMap<SmolStr, NonZero<u16>>,
+    remaps: &mut HashMap<SmolStr, NonZero<u16>, RandomState>,
     appends: &mut ConstPoolAppends,
     remapped: SmolStr,
 ) -> NonZero<u16> {
@@ -164,7 +170,7 @@ impl<'a> From<Attribute<'a>> for CowAttribute<'a> {
 /// Auxiliary buffer for a remapper.
 #[derive(Debug)]
 pub struct Buffer<'a> {
-    attribute_matcher: &'static HashMap<Box<[u8]>, AttributeKind>,
+    attribute_matcher: &'static HashMap<Box<[u8]>, AttributeKind, RandomState>,
 
     classes: Vec<NonZero<u16>>,
     field_refs: Vec<(NonZero<u16>, NonZero<u16>)>,
@@ -212,7 +218,7 @@ impl Buffer<'_> {
     /// Creates a new buffer.
     #[allow(clippy::missing_panics_doc)]
     pub fn new() -> Self {
-        static ATTRIBUTE_MATCHER_STATIC: OnceLock<HashMap<Box<[u8]>, AttributeKind>> =
+        static ATTRIBUTE_MATCHER_STATIC: OnceLock<HashMap<Box<[u8]>, AttributeKind, RandomState>> =
             OnceLock::new();
 
         Self {
