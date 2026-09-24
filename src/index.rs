@@ -3,6 +3,7 @@ use std::{
     hash::Hash,
     marker::PhantomData,
     num::NonZero,
+    pin::Pin,
 };
 
 use classfile::ConstantPoolEntry;
@@ -11,9 +12,10 @@ use simd_cesu8::mutf8;
 use smol_str::SmolStr;
 
 /// Naming mapping.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Index {
     pub(crate) classes: HashMap<SmolStr, Class>,
+    dyn_resolver: DynResolver,
 }
 
 /// Auxiliary information about the classes being remapped.
@@ -65,11 +67,13 @@ impl Index {
 
         let mut index = Self {
             classes: HashMap::new(),
+            dyn_resolver: Default::default(),
         };
         while deserializer
             .deserialize_class(RootVisitor(&mut index))?
             .is_some()
         {}
+
         Ok(index)
     }
 
@@ -81,6 +85,7 @@ impl Index {
         self.classes
             .get(src)
             .and_then(|c| c.name.as_deref())
+            .or_else(|| self.dyn_resolver.resolve(src, self))
             .inspect(|_| *changed = true)
             .unwrap_or(src)
     }
@@ -157,6 +162,15 @@ impl Index {
     }
 }
 
+impl Clone for Index {
+    fn clone(&self) -> Self {
+        Self {
+            classes: self.classes.clone(),
+            dyn_resolver: Default::default(),
+        }
+    }
+}
+
 impl Context {
     /// Creates an empty remapper context.
     pub fn new() -> Self {
@@ -207,6 +221,34 @@ impl Context {
         let mut cp_cap = 0;
         for buf in iter {
             let _ = self.populate_inherency_inner(buf.as_ref(), &mut cp_cap);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DynResolver {
+    // SAFETY: do not remove entries
+    map: scc::HashMap<SmolStr, Pin<Box<str>>>,
+}
+
+impl DynResolver {
+    fn resolve<'a>(&'a self, req: &str, index: &Index) -> Option<&'a str> {
+        if let Some(target) = self.map.get_sync(req) {
+            Some(unsafe { &*std::ptr::from_ref(&**target) })
+        } else if let Some((base, suffix)) = req.rsplit_once('$')
+            && suffix.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
+            let mut changed = false;
+            let base_mapped = index.remap_class_name_tracked(base, &mut changed);
+            if !changed {
+                return None;
+            }
+            let mapped = Pin::new(format!("{}${}", base_mapped, suffix).into_boxed_str());
+            let result = unsafe { &*std::ptr::from_ref(&*mapped) };
+            drop(self.map.insert_sync(req.into(), mapped));
+            Some(result)
+        } else {
+            None
         }
     }
 }

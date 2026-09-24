@@ -6,7 +6,6 @@ use std::{
 };
 
 use remapper::{Context, Index};
-use smol_str::ToSmolStr as _;
 use zip::{DateTime, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use crate::Error;
@@ -117,60 +116,175 @@ where
     Ok(())
 }
 
+const MANIFEST_LINE_LIMIT: usize = 72;
+
+struct ManifestReader<R> {
+    src: R,
+    pending: Option<String>,
+}
+
+impl<R: BufRead> ManifestReader<R> {
+    fn new(src: R) -> Self {
+        Self { src, pending: None }
+    }
+
+    fn read_physical(&mut self) -> Result<Option<String>, Error> {
+        if let Some(line) = self.pending.take() {
+            return Ok(Some(line));
+        }
+        let mut line = String::new();
+        if self.src.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        while line.ends_with('\n') || line.ends_with('\r') {
+            line.pop();
+        }
+        Ok(Some(line))
+    }
+
+    fn read_logical(&mut self) -> Result<Option<String>, Error> {
+        let Some(mut line) = self.read_physical()? else {
+            return Ok(None);
+        };
+        while let Some(next) = self.read_physical()? {
+            if let Some(continuation) = next.strip_prefix(' ') {
+                line.push_str(continuation);
+            } else {
+                self.pending = Some(next);
+                break;
+            }
+        }
+        Ok(Some(line))
+    }
+
+    fn read_section(&mut self) -> Result<(bool, Vec<(String, String)>), Error> {
+        let mut attrs = Vec::new();
+        let mut saw_line = false;
+        while let Some(line) = self.read_logical()? {
+            saw_line = true;
+            if line.is_empty() {
+                break;
+            }
+            if let Some((key, val)) = split_attribute(&line) {
+                attrs.push((key.to_owned(), val.to_owned()));
+            }
+        }
+        Ok((saw_line, attrs))
+    }
+}
+
 fn process_manifest<R, W>(src: R, mut dst: W, index: &Index) -> Result<(), Error>
 where
     R: BufRead,
     W: Write,
 {
-    let mut read = src.lines();
-    while let Some(line) = read.next().transpose()?
-        // truncate at empty lines
-        && let Some((key, val)) = line.split_once(": ")
-    {
-        match key {
-            "Main-Class" | "Launcher-Agent-Class" => {
-                let orig = val.replace('.', "/");
-                let remapped = index.remap_class_name(&orig).replace('/', ".");
-                writeln!(dst, "{key}: {remapped}")?
-            }
-            // ommitted
-            "Signature-Version" => (),
-            _ => writeln!(dst, "{key}: {val}")?,
-        }
-    }
-    let mut buf = Vec::new();
+    let mut read = ManifestReader::new(src);
+    let mut wrote_any = false;
+
     loop {
-        buf.clear();
-        let name = if let Some(line) = read.next().transpose()?
-            && let Some(("Name", val)) = line.split_once(": ")
-        {
-            if let Some(cl) = val
-                .strip_suffix(".class")
-                .and_then(|cl| make_bin_name(Path::new(cl)))
-            {
-                let remapped = index.remap_class_name(&cl);
-                format!("{}.class", remapped)
-            } else {
-                val.to_owned()
-            }
-        } else {
+        let (saw_line, attrs) = read.read_section()?;
+        if !saw_line {
             break;
-        };
-        while let Some(line) = read.next().transpose()?
-            && let Some((key, val)) = line.split_once(": ")
-        {
-            if !(key.contains("Digest") || matches!(key, "Magic")) {
-                buf.push((key.to_smolstr(), val.to_owned()))
-            }
         }
-        if !buf.is_empty() {
-            writeln!(dst, "\nName: {name}")?;
-            for (key, val) in &buf {
-                writeln!(dst, "{key}: {val}")?
-            }
+        if attrs.is_empty() {
+            continue;
         }
+
+        let is_entry = attrs[0].0 == "Name";
+        if !wrote_any && !is_entry {
+            for (key, val) in &attrs {
+                match key.as_str() {
+                    "Signature-Version" => (),
+                    "Main-Class" | "Premain-Class" | "Agent-Class" | "Launcher-Agent-Class" => {
+                        write_manifest_attribute(&mut dst, key, &remap_class_reference(val, index))?
+                    }
+                    _ => write_manifest_attribute(&mut dst, key, val)?,
+                }
+            }
+            wrote_any = true;
+            continue;
+        }
+
+        // A section with nothing left once stale integrity metadata is
+        // stripped carries no information, so omit it entirely.
+        let retained: Vec<_> = attrs
+            .iter()
+            .skip(usize::from(is_entry))
+            .filter(|(key, _)| !is_stale_integrity_attr(key))
+            .collect();
+        if retained.is_empty() {
+            continue;
+        }
+
+        if wrote_any {
+            dst.write_all(b"\r\n")?;
+        }
+        if is_entry {
+            write_manifest_attribute(&mut dst, "Name", &remap_entry_name(&attrs[0].1, index))?;
+        }
+        for (key, val) in retained {
+            write_manifest_attribute(&mut dst, key, val)?;
+        }
+        wrote_any = true;
     }
 
+    Ok(())
+}
+
+fn split_attribute(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.split_once(':')?;
+    if key.is_empty() || key.contains(char::is_whitespace) {
+        return None;
+    }
+    // The specification separates the key and value with one space, which is
+    // not part of the value; tolerate manifests that omit it.
+    Some((key, value.strip_prefix(' ').unwrap_or(value)))
+}
+
+fn is_stale_integrity_attr(key: &str) -> bool {
+    key.contains("Digest") || key == "Magic"
+}
+
+fn remap_class_reference(val: &str, index: &Index) -> String {
+    let orig = val.replace('.', "/");
+    index.remap_class_name(&orig).replace('/', ".")
+}
+
+fn remap_entry_name(val: &str, index: &Index) -> String {
+    if let Some(name) = val
+        .strip_suffix(".class")
+        .and_then(|name| make_bin_name(Path::new(name)))
+    {
+        format!("{}.class", index.remap_class_name(&name))
+    } else {
+        val.to_owned()
+    }
+}
+
+fn write_manifest_attribute<W: Write>(mut dst: W, key: &str, value: &str) -> Result<(), Error> {
+    let line = format!("{key}: {value}");
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    let mut first = true;
+    while start < bytes.len() {
+        let budget = if first {
+            MANIFEST_LINE_LIMIT
+        } else {
+            MANIFEST_LINE_LIMIT - 1
+        };
+        let mut end = (start + budget).min(bytes.len());
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        debug_assert!(end > start, "line limit must exceed one code point");
+        if !first {
+            dst.write_all(b" ")?;
+        }
+        dst.write_all(&bytes[start..end])?;
+        dst.write_all(b"\r\n")?;
+        start = end;
+        first = false;
+    }
     Ok(())
 }
 

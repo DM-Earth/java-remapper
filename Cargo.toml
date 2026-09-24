@@ -13,6 +13,7 @@ mapping-serde = { version = "0.1", path = "../mapping-serde", package = "java-ma
 java-bin-name = { version = "0.3", path = "../java-bin-name" }
 smol_str = "0.3"
 simd_cesu8 = "1.2"
+scc = "3.8"
 
 [lints]
 workspace = true

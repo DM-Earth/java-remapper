@@ -589,7 +589,9 @@ impl ConstPoolBuffer<'_> {
     #[must_use]
     fn remap_class_name(&mut self, index: &Index, nid: NonZero<u16>) -> NonZero<u16> {
         self.remap_utf8(nid, RemapKind::ClassName, |name| {
-            index.classes.get(name).and_then(|class| class.name.clone())
+            let mut changed = false;
+            let mapped = index.remap_class_name_tracked(name, &mut changed);
+            changed.then_some(mapped).map(Into::into)
         })
     }
 
