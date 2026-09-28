@@ -1,4 +1,52 @@
-//! Java classfile remapper library.
+//! Java classfile remapper.
+//!
+//! Rewrites names in JVM bytecode using Java deobfuscation mappings: class,
+//! field, and method names, descriptors, signatures, annotations, inner
+//! classes, and local variables. Bytecode instructions are left untouched—only
+//! the constant pool and class metadata are updated.
+//!
+//! # Usage
+//!
+//! Build an [`Index`] from a mapping source, then call [`remap`]:
+//!
+//! ```rust,no_run
+//! use java_remapper::{Buffer, Context, Index, remap};
+//!
+//! # fn load_index() -> Index { unimplemented!() }
+//! # fn load_class() -> Vec<u8> { unimplemented!() }
+//! let index = load_index();
+//! let src = load_class();
+//!
+//! // Optional: record superclass/interface relationships so inherited members
+//! // can be resolved. Pass every class that belongs to the same unit.
+//! let mut cx = Context::new();
+//! cx.populate_inherency([&src]);
+//!
+//! // A [`Buffer`] can be reused across calls.
+//! let mut buf = Buffer::new();
+//! let mut dst = Vec::new();
+//! remap(&src, &mut dst, &index, &mut buf, &cx)?;
+//! # Ok::<(), java_remapper::Error>(())
+//! ```
+//!
+//! [`Index`] implements [`mapping_serde::Deserialize`], so it can be built from
+//! any format supported by the [mapping-serde] ecosystem (Tiny1/Tiny2, Enigma,
+//! Proguard).
+//!
+//! # Feature flags
+//!
+//! Hash maps used internally are selected by feature flags.
+//!
+//! - `ahash` _(default)_: use [`ahash`].
+//! - `fx-hash`: use [`rustc_hash`] instead. Enable it with
+//!   `default-features = false, features = ["fx-hash"]`.
+//!
+//! If neither is enabled, the standard library hasher is used. If both are
+//! enabled, `fx-hash` takes precedence.
+//!
+//! [mapping-serde]: https://docs.rs/java-mapping-serde
+//! [`ahash`]: https://docs.rs/ahash
+//! [`rustc_hash`]: https://docs.rs/rustc-hash
 
 use std::{borrow::Cow, collections::HashMap, num::NonZero, sync::OnceLock};
 
