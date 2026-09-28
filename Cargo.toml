@@ -8,9 +8,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-classfile = { version = "0.1", path = "../classfile" }
-mapping-serde = { version = "0.1", path = "../mapping-serde", package = "java-mapping-serde" }
-java-bin-name = { version = "0.3", path = "../java-bin-name" }
+classfile = { version = "0.1", package = "java-classfile" }
+mapping-serde = { version = "0.1", package = "java-mapping-serde" }
+java-bin-name = "0.3"
 smol_str = "0.3"
 simd_cesu8 = "1.2"
 scc = "3.8"

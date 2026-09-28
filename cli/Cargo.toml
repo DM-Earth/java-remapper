@@ -8,8 +8,8 @@ clap_lex = "1.1"
 smol_str = "0.3"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 remapper = { path = "../", package = "java-remapper", default-features = false }
-mapping-serde = { version = "0.1", path = "../../mapping-serde", package = "java-mapping-serde" }
-mapping-serde-tiny2 = { version = "0.1", path = "../../mapping-serde/formats/tiny2", package = "java-mapping-serde-tiny2" }
+mapping-serde = { version = "0.1", package = "java-mapping-serde" }
+mapping-serde-tiny2 = { version = "0.1", package = "java-mapping-serde-tiny2" }
 
 [features]
 default = ["ahash"]
