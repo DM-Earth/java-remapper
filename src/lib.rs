@@ -17,8 +17,8 @@ use classfile::{
     },
 };
 use java_bin_name::{
-    ClassSignature, FieldType, MethodDescriptor, MethodSignature, ReducedClassTypeSignature,
-    TypeArgument, TypeParameter, TypeSignature,
+    ClassSignature, FieldType, MethodDescriptor, MethodReturnDescriptor, MethodSignature,
+    ReducedClassTypeSignature, TypeArgument, TypeParameter, TypeSignature,
 };
 use simd_cesu8::mutf8;
 use smol_str::{SmolStr, ToSmolStr as _};
@@ -71,6 +71,8 @@ enum RemapKind {
     MethodName,
     /// Descriptor of a method.
     MethodDescriptor,
+    /// Descriptor of a method return descriptor.
+    MethodReturnDescriptor,
     /// Name of a local variable.
     LocalVarName,
     /// Signature of a field.
@@ -329,6 +331,15 @@ impl Buffer<'_> {
         self.methods.clear();
         self.attrs.clear();
     }
+}
+
+macro_rules! utf8 {
+    ($s:expr,$i:expr) => {
+        match $s.get($i.get() as usize) {
+            Some(Some(ConstantPoolEntry::Utf8(name))) => mutf8::decode(name.0).ok(),
+            _ => None,
+        }
+    };
 }
 
 impl ConstPoolBuffer<'_> {
@@ -616,7 +627,7 @@ impl ConstPoolBuffer<'_> {
         if remapped == name_idx {
             return None;
         }
-        let name = self.utf8(remapped)?;
+        let name = utf8!(self.entries, remapped)?;
         Some(
             name.rsplit_once('$')
                 .map_or(&*name, |(_, simple)| simple)
@@ -643,15 +654,6 @@ impl ConstPoolBuffer<'_> {
                 .unwrap_or(idx)
         } else {
             idx
-        }
-    }
-
-    /// Decodes the `Utf8` entry at `idx`.
-    #[inline]
-    fn utf8(&self, idx: NonZero<u16>) -> Option<Cow<'_, str>> {
-        match self.entries.get(idx.get() as usize) {
-            Some(Some(ConstantPoolEntry::Utf8(name))) => mutf8::decode(name.0).ok(),
-            _ => None,
         }
     }
 
@@ -767,8 +769,18 @@ impl ConstPoolBuffer<'_> {
                 // TODO: is this truly useless here?
                 const_name_idx: _,
             } => *type_name_idx = self.remap_field_type(index, *type_name_idx),
-            // `Class` entries are rewritten in place, so nothing has to be written back here.
-            ElementValue::Class(_) => (),
+            ElementValue::Class(desc) => {
+                if let Some(state) = self.states.get_mut(desc.get() as usize)
+                    && let Some(new) =
+                        state.remap(RemapKind::MethodReturnDescriptor, &mut self.appends, || {
+                            utf8!(self.entries, *desc)
+                                .and_then(|s| remap_method_ret(index, &s).ok())
+                                .flatten()
+                        })
+                {
+                    *desc = new
+                }
+            }
             ElementValue::Annotation(annotation) => self.remap_annotation(index, annotation),
             ElementValue::Array(values) => {
                 for value in values.to_mut() {
@@ -797,7 +809,7 @@ impl ConstPoolBuffer<'_> {
         let desc_idx = self.remap_utf8(di, RemapKind::FieldType, |desc| {
             remap_field_type(index, desc).ok().flatten()
         });
-        let Some(name) = self.utf8(ni) else {
+        let Some(name) = utf8!(self.entries, ni) else {
             return (ni, desc_idx);
         };
         let Some(dst) = class.and_then(|cl| index.remap_field_name(cl, &name, cx)) else {
@@ -818,7 +830,7 @@ impl ConstPoolBuffer<'_> {
         let desc_idx = self.remap_utf8(di, RemapKind::MethodDescriptor, |desc| {
             remap_method_desc(index, desc).ok().flatten()
         });
-        let (Some(name), Some(desc)) = (self.utf8(ni), self.utf8(di)) else {
+        let (Some(name), Some(desc)) = (utf8!(self.entries, ni), utf8!(self.entries, di)) else {
             return (None, ni, desc_idx);
         };
         let Some(dst) = class.and_then(|cl| {
@@ -880,8 +892,28 @@ fn remap_method_desc(
         *param = mapped;
     }
     match &mut desc.ret {
-        java_bin_name::MethodReturnDescriptor::Void => (),
-        java_bin_name::MethodReturnDescriptor::Type(ty) => {
+        MethodReturnDescriptor::Void => (),
+        MethodReturnDescriptor::Type(ty) => {
+            let mapped = remap_field_type_raw(
+                index,
+                std::mem::replace(ty, FieldType::Primitive(java_bin_name::PrimitiveType::Byte)),
+                &mut changed,
+            );
+            *ty = mapped;
+        }
+    }
+    Ok(changed.then(|| desc.to_smolstr()))
+}
+
+fn remap_method_ret(
+    index: &Index,
+    src: &str,
+) -> Result<Option<SmolStr>, java_bin_name::InvalidMethodDescriptor> {
+    let mut desc = java_bin_name::parse::<'_, MethodReturnDescriptor<'_>>(src)?;
+    let mut changed = false;
+    match &mut desc {
+        MethodReturnDescriptor::Void => (),
+        MethodReturnDescriptor::Type(ty) => {
             let mapped = remap_field_type_raw(
                 index,
                 std::mem::replace(ty, FieldType::Primitive(java_bin_name::PrimitiveType::Byte)),
