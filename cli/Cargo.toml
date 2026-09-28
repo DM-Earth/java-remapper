@@ -1,13 +1,18 @@
 [package]
 name = "java-remapper-cli"
 version = "0.1.0"
-edition = "2024"
+description = "JVM bytecode and JAR remapper"
+keywords = ["java", "remap", "jar", "bytecode", "remapper"]
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 clap_lex = "1.1"
 smol_str = "0.3"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
-remapper = { path = "../", package = "java-remapper", default-features = false }
+remapper = { path = "../", version = "0.1", package = "java-remapper", default-features = false }
 mapping-serde = { version = "0.1", package = "java-mapping-serde" }
 mapping-serde-tiny2 = { version = "0.1", package = "java-mapping-serde-tiny2" }
 

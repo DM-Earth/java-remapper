@@ -5,7 +5,18 @@ resolver = "3"
 [package]
 name = "java-remapper"
 version = "0.1.0"
+description = "JVM bytecode remapper library"
+keywords = ["java", "remap", "bytecode", "remapper"]
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[workspace.package]
 edition = "2024"
+authors = ["Jiening Yu <jiening.yu@outlook.com>"]
+license = "GPL-3.0-or-later"
+repository = "https://codeberg.org/DM-Earth/java-remapper"
 
 [dependencies]
 classfile = { version = "0.1", package = "java-classfile" }
